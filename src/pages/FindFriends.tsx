@@ -16,7 +16,7 @@ const FindFriends: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [selectedInterests, setSelectedInterests] = useState<string[]>([]);
   const [allInterests, setAllInterests] = useState<string[]>([]);
-  const [isFiltering, setIsFiltering] = useState(false);
+  const [isFiltering] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   
   // Listen for Firebase auth state changes

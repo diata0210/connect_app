@@ -9,7 +9,6 @@ const Clubs = () => {
   const [categories, setCategories] = useState<string[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [user, setUser] = useState<any>(null);
 
   useEffect(() => {
     // Fetch clubs from database
@@ -35,20 +34,7 @@ const Clubs = () => {
       }
     };
 
-    // Fetch first user for demo purposes (in a real app, this would be from auth)
-    const fetchUser = async () => {
-      try {
-        const users = await dbService.getAllUsers();
-        if (users.length > 0) {
-          setUser(users[0]);
-        }
-      } catch (error) {
-        console.error('Error fetching user:', error);
-      }
-    };
-
     fetchClubs();
-    fetchUser();
   }, []);
 
   useEffect(() => {

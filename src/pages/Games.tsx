@@ -1,6 +1,4 @@
 import { useState } from 'react';
-import { currentMockUser } from '../mockData';
-
 // Game types and interfaces
 interface Question {
   id: number;
@@ -13,7 +11,6 @@ interface TwoTruthsOneLieGame {
 }
 
 const Games = () => {
-  const [user] = useState<any>(currentMockUser);
   const [activeGame, setActiveGame] = useState<string | null>(null);
   
   // Question Game

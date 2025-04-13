@@ -80,13 +80,6 @@ const CreateClub = () => {
     setLoading(true);
     
     try {
-      // Create the club in Firebase
-      const newClub = await dbService.createClub(
-        name, 
-        description, 
-        category, 
-        currentUser.uid
-      );
       
       setLoading(false);
       navigate(`/clubs`);

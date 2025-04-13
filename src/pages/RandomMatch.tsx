@@ -25,7 +25,6 @@ interface MatchOptions {
 }
 
 const RandomMatch = () => {
-  const [loading, setLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(currentMockUser);
   const [matchedUser, setMatchedUser] = useState<User | null>(null);
   const [commonInterests, setCommonInterests] = useState<string[]>([]);
@@ -66,7 +65,6 @@ const RandomMatch = () => {
     }
 
     setIsMatching(true);
-    setLoading(true);
     setMatchedUser(null);
     setCommonInterests([]);
     setIsAnonymous(anonymous);
@@ -149,7 +147,6 @@ const RandomMatch = () => {
       setMatchInProgress(false);
       
       if (potentialMatches.length === 0) {
-        setLoading(false);
         setIsMatching(false);
         alert('No matches found with your criteria. Try adjusting your filters or try again later!');
         return;
@@ -161,7 +158,6 @@ const RandomMatch = () => {
       
       setMatchedUser(match);
       setCommonInterests(match.commonInterests || []);
-      setLoading(false);
     }, 2000); // simulate network delay
   };
 
@@ -561,7 +557,6 @@ const RandomMatch = () => {
                 <button
                   onClick={() => {
                     setIsMatching(false);
-                    setLoading(false);
                     setMatchInProgress(false);
                   }}
                   className="text-indigo-600 font-medium hover:text-indigo-700 transition-colors focus:outline-none"

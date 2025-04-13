@@ -322,7 +322,7 @@ const WordGame: React.FC<{
   const [guessedWord, setGuessedWord] = useState('');
   const [guessedLetters, setGuessedLetters] = useState<string[]>([]);
   const [attempts, setAttempts] = useState(0);
-  const [isGameCreator, setIsGameCreator] = useState(currentUserId !== otherUserId);
+  const [isGameCreator] = useState(currentUserId !== otherUserId);
   const [status, setStatus] = useState('');
   const [showWordInput, setShowWordInput] = useState(isGameCreator);
   const maxAttempts = 8;
@@ -475,7 +475,6 @@ const ChatGames: React.FC<GameProps> = ({
   onEndGame, 
   currentUser, 
   otherUser, 
-  chatId 
 }) => {
   // Function to handle game results
   const handleGameResult = (result: GameResult) => {
