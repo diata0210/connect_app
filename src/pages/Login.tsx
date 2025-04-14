@@ -1,13 +1,34 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import dbService from '../services/dbService';
 
 const Login = () => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [email, setEmail] = useState('test@gmail.com');
+  const [password, setPassword] = useState('123456');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+
+  // Automatically login with test account on component mount
+  useEffect(() => {
+    const autoLogin = async () => {
+      try {
+        setLoading(true);
+        const user = await dbService.loginUser(email, password);
+        
+        if (user) {
+          console.log('Auto-login successful');
+          navigate('/');
+        }
+      } catch (err) {
+        console.error('Auto-login error:', err);
+        setLoading(false);
+        // Silent fail for auto-login, user can still manually login
+      }
+    };
+
+    autoLogin();
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
