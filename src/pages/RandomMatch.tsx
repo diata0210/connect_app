@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { mockUsers, currentMockUser } from '../mockData';
+import dbService from '../services/dbService';
+import { auth } from '../firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 
 interface User {
   uid: string;
@@ -25,7 +27,7 @@ interface MatchOptions {
 }
 
 const RandomMatch = () => {
-  const [currentUser, setCurrentUser] = useState<User | null>(currentMockUser);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [matchedUser, setMatchedUser] = useState<User | null>(null);
   const [commonInterests, setCommonInterests] = useState<string[]>([]);
   const [isMatching, setIsMatching] = useState(false);
@@ -42,21 +44,62 @@ const RandomMatch = () => {
   });
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
   const [matchInProgress, setMatchInProgress] = useState(false);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const navigate = useNavigate();
 
-  // Add gender and location to mock users
+  // Fetch current user and all users from Firebase
   useEffect(() => {
-    // This would normally come from the database
-    // Just for demonstration we're enhancing the current user with additional attributes
-    if (currentUser) {
-      setCurrentUser({
-        ...currentUser,
-        gender: 'male',
-        location: 'Hanoi',
-        age: 25
-      });
-    }
-  }, []);
+    const fetchCurrentUser = async () => {
+      try {
+        setIsLoading(true);
+        
+        // Listen to authentication state
+        const unsubscribe = onAuthStateChanged(auth, async (user) => {
+          if (user) {
+            // Get current user details from Firestore
+            const userData = await dbService.getUser(user.uid);
+            if (userData) {
+              setCurrentUser({
+                uid: userData.uid,
+                displayName: userData.displayName,
+                email: userData.email,
+                interests: userData.interests || [],
+                photoURL: userData.photoURL,
+                gender: 'not specified', // These fields can be updated if you add them to your user profile
+                location: 'not specified',
+                age: 0
+              });
+            }
+            
+            // Get all users for potential matches
+            const users = await dbService.getAllUsers();
+            // Filter out current user
+            const filteredUsers = users.filter(u => u.uid !== user.uid);
+            setAllUsers(filteredUsers.map(u => ({
+              ...u,
+              gender: 'not specified', // Adding default values
+              location: 'not specified',
+              age: 0,
+              interests: u.interests || [] // Ensure interests is always defined as array
+            })));
+            
+            setIsLoading(false);
+          } else {
+            // Not logged in, redirect to login
+            navigate('/login');
+          }
+        });
+        
+        return () => unsubscribe();
+      } catch (error) {
+        console.error("Error fetching user data:", error);
+        setIsLoading(false);
+      }
+    };
+    
+    fetchCurrentUser();
+  }, [navigate]);
 
   const findMatch = async (anonymous: boolean) => {
     if (!currentUser || !currentUser.interests || currentUser.interests.length === 0) {
@@ -79,86 +122,92 @@ const RandomMatch = () => {
 
     // Simulate API delay
     setTimeout(() => {
+      // Check if we have any users to work with
+      if (allUsers.length === 0) {
+        setIsMatching(false);
+        setMatchInProgress(false);
+        alert('No other users found in the system. Invite some friends to join!');
+        return;
+      }
+
+      console.log("Finding match among", allUsers.length, "users");
+      
       // Get all users who match our criteria
       const potentialMatches: User[] = [];
       
       // Enhanced filtering based on selected criteria
-      mockUsers.forEach((userData) => {
-        // Skip current user
-        if (userData.uid === currentUser.uid) return;
+      allUsers.forEach((userData) => {
+        // Skip if user has no interests array at all (shouldn't happen but for safety)
+        if (!userData.interests) return;
         
-        // Filter by gender if enabled
-        if (options.byGender && options.preferredGender !== 'any') {
-          // Add gender to mockUsers for demo purposes
-          const userGender = userData.uid === 'user1' ? 'male' : 
-                             userData.uid === 'user2' ? 'female' : 
-                             userData.uid === 'user3' ? 'male' : 
-                             userData.uid === 'user4' ? 'female' : 'male';
-          
-          if (options.preferredGender !== userGender) {
-            return;
-          }
-        }
-        
-        // Filter by location if enabled
-        if (options.byLocation) {
-          // Add location to mockUsers for demo purposes
-          const userLocation = userData.uid === 'user1' ? 'Hanoi' : 
-                               userData.uid === 'user2' ? 'Ho Chi Minh City' : 
-                               userData.uid === 'user3' ? 'Hanoi' : 
-                               userData.uid === 'user4' ? 'Da Nang' : 'Hanoi';
-          
-          // Very simplistic location filtering for demo
-          if (options.location !== userLocation && options.maxDistance < 100) {
-            return;
-          }
-        }
-        
-        // Always find common interests (even if not filtering by them)
+        // Calculate common interests regardless of filters
         const common = currentUser.interests.filter(interest => 
           userData.interests && userData.interests.includes(interest)
         );
         
+        // Apply filters if selected
+        let passesFilters = true;
+        
+        // Filter by gender if enabled
+        if (options.byGender && options.preferredGender !== 'any') {
+          const userGender = userData.gender || 'not specified';
+          if (options.preferredGender !== userGender) {
+            passesFilters = false;
+          }
+        }
+        
+        // Filter by location if enabled
+        if (passesFilters && options.byLocation) {
+          const userLocation = userData.location || 'not specified';
+          if (options.location !== userLocation && options.maxDistance < 100) {
+            passesFilters = false;
+          }
+        }
+        
         // Filter by interests if enabled
-        if (options.byInterests && common.length === 0) {
-          return;
+        if (passesFilters && options.byInterests && common.length === 0) {
+          passesFilters = false;
         }
         
         // User passed all filters, add them to potential matches
-        potentialMatches.push({
-          ...userData,
-          // Add mock data for demo purposes
-          gender: userData.uid === 'user1' ? 'male' : 
-                  userData.uid === 'user2' ? 'female' : 
-                  userData.uid === 'user3' ? 'male' : 
-                  userData.uid === 'user4' ? 'female' : 'male',
-          location: userData.uid === 'user1' ? 'Hanoi' : 
-                    userData.uid === 'user2' ? 'Ho Chi Minh City' : 
-                    userData.uid === 'user3' ? 'Hanoi' : 
-                    userData.uid === 'user4' ? 'Da Nang' : 'Hanoi',
-          age: userData.uid === 'user1' ? 25 : 
-               userData.uid === 'user2' ? 28 : 
-               userData.uid === 'user3' ? 32 : 
-               userData.uid === 'user4' ? 24 : 30,
-          commonInterests: common
-        });
+        if (passesFilters) {
+          potentialMatches.push({
+            ...userData,
+            commonInterests: common
+          });
+        }
       });
       
       setMatchInProgress(false);
       
       if (potentialMatches.length === 0) {
-        setIsMatching(false);
-        alert('No matches found with your criteria. Try adjusting your filters or try again later!');
-        return;
+        // If no matches found with current filters, find a match without any filters
+        console.log("No matches with filters, finding any match");
+        
+        // Choose a random user from all users
+        const randomIndex = Math.floor(Math.random() * allUsers.length);
+        const randomUser = allUsers[randomIndex];
+        const common = currentUser.interests.filter(interest => 
+          randomUser.interests && randomUser.interests.includes(interest)
+        );
+        
+        setMatchedUser({
+          ...randomUser,
+          commonInterests: common
+        });
+        setCommonInterests(common || []);
+        
+        // Show a message indicating filters were relaxed
+        alert('No matches found with your criteria. We found someone else you might like to chat with!');
+      } else {
+        // Randomly select a match from filtered users
+        const randomIndex = Math.floor(Math.random() * potentialMatches.length);
+        const match = potentialMatches[randomIndex];
+        
+        setMatchedUser(match);
+        setCommonInterests(match.commonInterests || []);
       }
-      
-      // Randomly select a match
-      const randomIndex = Math.floor(Math.random() * potentialMatches.length);
-      const match = potentialMatches[randomIndex];
-      
-      setMatchedUser(match);
-      setCommonInterests(match.commonInterests || []);
-    }, 2000); // simulate network delay
+    }, 1000);
   };
 
   const handleOptionChange = (option: keyof MatchOptions, value: any) => {
@@ -171,11 +220,20 @@ const RandomMatch = () => {
   const startChat = async () => {
     if (!currentUser || !matchedUser) return;
     
-    // Create a unique chat ID by combining user IDs (sorted to ensure consistency)
-    const chatId = [currentUser.uid, matchedUser.uid].sort().join('_');
-    
-    // Navigate to the chat
-    navigate(`/chat/${chatId}`);
+    try {
+      // First create the chat record in the database
+      const chatId = await dbService.createChat(
+        currentUser.uid, 
+        matchedUser.uid,
+        isAnonymous // Pass the anonymous flag to create proper anonymous chat
+      );
+      
+      // Then navigate to the chat
+      navigate(`/chat/${chatId}`);
+    } catch (error) {
+      console.error('Error creating chat:', error);
+      alert('Failed to start chat. Please try again.');
+    }
   };
 
   const findNewMatch = () => {
@@ -194,6 +252,16 @@ const RandomMatch = () => {
     const randomNum = Math.floor(Math.random() * 10000);
     return `Anonymous User ${randomNum}`;
   };
+
+  // Show loading state when initializing data
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center">
+        <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-indigo-600"></div>
+        <p className="mt-4 text-lg text-gray-600">Loading user data...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 pt-24 pb-12">
