@@ -23,9 +23,9 @@ const Home = () => {
           console.error('Error fetching current user:', error);
         }
       } else {
-        // User is not signed in, redirect to login
+        // User is not signed in but we allow them to stay on the home page
         setUser(null);
-        navigate('/login');
+        // Remove the redirect to login
       }
     });
 

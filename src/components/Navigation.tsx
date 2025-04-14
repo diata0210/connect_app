@@ -33,11 +33,8 @@ const Navigation = () => {
       } else {
         // User is signed out
         setUser(null);
-        // Redirect to login page if not already there
-        if (!window.location.pathname.includes('/login') && 
-            !window.location.pathname.includes('/register')) {
-          navigate('/login');
-        }
+        // Remove the automatic redirect to login page
+        // This allows users to browse without authentication
       }
     });
 
