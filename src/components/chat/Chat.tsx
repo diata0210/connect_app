@@ -1,5 +1,6 @@
+//@ts-ignore
 import React, { useEffect, useState, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { db, auth } from '../../firebase';
 import { 
   collection, 
@@ -17,8 +18,13 @@ import { onAuthStateChanged } from 'firebase/auth';
 import ChatGames from './ChatGames';
 import ChatSuggestions from './ChatSuggestions';
 import IceBreakerModal from './IceBreakerModal';
-import ContentSharing from './ContentSharing';
-import FriendshipJournal from './FriendshipJournal';
+import MusicPlayer from './MusicPlayer';
+import MusicInvitationModal from './MusicInvitationModal';
+import {
+  acceptMusicInvitation,
+  declineMusicInvitation,
+  checkMusicInvitation
+} from '../../services/musicSyncService';
 
 interface Message {
   id?: string;
@@ -28,6 +34,7 @@ interface Message {
   timestamp: any;
   type?: string;
   gameInvitation?: GameInvitation;
+  reactions?: { [emoji: string]: string[] }; // emoji -> userId[]
 }
 
 interface User {
@@ -39,33 +46,40 @@ interface User {
 
 interface GameInvitation {
   id: string;
-  gameType: 'tictactoe' | 'connect4' | 'wordgame';
+  gameType: 'truth-or-lie' | 'word-chain' | 'proverbs' | 'riddles'; // Updated game types
   senderId: string;
   recipientId: string;
   chatId: string;
   status: 'pending' | 'accepted' | 'declined';
   timestamp: any;
+  gameSessionId?: string; // Added to store game session ID upon acceptance
 }
 
 export default function Chat() {
   const { chatId } = useParams<{ chatId: string }>();
+  const navigate = useNavigate(); // Add this line to use navigation
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [otherUser, setOtherUser] = useState<User | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [showGameMenu, setShowGameMenu] = useState(false);
-  const [activeGame, setActiveGame] = useState<'tictactoe' | 'connect4' | 'wordgame' | null>(null);
+  const [activeGame, setActiveGame] = useState<'tictactoe' | 'connect4' | 'wordgame' | null>(null); // This state might be for other embedded games.
   const [pendingGameInvite, setPendingGameInvite] = useState<GameInvitation | null>(null);
   const [showInviteMessage, setShowInviteMessage] = useState(false);
   const [isAnonymousChat, setIsAnonymousChat] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [sharedInterests, setSharedInterests] = useState<string[]>([]);
   const [showIceBreakerModal, setShowIceBreakerModal] = useState(false);
-  const [showContentSharing, setShowContentSharing] = useState(false);
-  const [showFriendshipJournal, setShowFriendshipJournal] = useState(false);
+  const [showMusicPlayer, setShowMusicPlayer] = useState(false);
+  const [showMusicInvitation, setShowMusicInvitation] = useState(false);
+  const [musicInviterId, setMusicInviterId] = useState<string | undefined>(undefined);
+  const [showReactionPicker, setShowReactionPicker] = useState<string | null>(null); // messageId
   
   const messagesEndRef = useRef<null | HTMLDivElement>(null);
+
+  // Reaction emoji list
+  const REACTION_EMOJIS = ['👍', '😂', '😍', '😮', '😢', '🔥', '🎉', '😆', '😡', '🙏'];
 
   // Listen for auth state changes
   useEffect(() => {
@@ -189,27 +203,33 @@ export default function Chat() {
         }
         
         // Set up real-time listener for messages
+        const messagesRef = collection(db, 'messages');
         const q = query(
-          collection(db, 'messages'),
+          messagesRef,
           where('chatId', '==', chatId),
           orderBy('timestamp', 'asc')
         );
+        
+        console.log("Setting up messages listener for chatId:", chatId);
         
         const unsubscribe = onSnapshot(q, (querySnapshot) => {
           const msgs: Message[] = [];
           querySnapshot.forEach((doc) => {
             const data = doc.data();
+            console.log("Message data:", data);
             msgs.push({
               id: doc.id,
-              chatId: data.chatId,
-              senderId: data.senderId,
-              text: data.text,
+              chatId: data.chatId || chatId,
+              senderId: data.senderId || "unknown",
+              text: data.text || "",
               timestamp: data.timestamp?.toDate() || new Date(),
               type: data.type,
-              gameInvitation: data.gameInvitation
+              gameInvitation: data.gameInvitation,
+              reactions: data.reactions
             });
           });
           
+          console.log(`Found ${msgs.length} messages for chat ${chatId}`);
           setMessages(msgs);
           setLoading(false);
           
@@ -250,10 +270,30 @@ export default function Chat() {
       msg.gameInvitation?.status === 'pending'
     );
     
+    // Get the most recent game invitation that hasn't been responded to
     if (pendingInvites.length > 0) {
       const latestInvite = pendingInvites[pendingInvites.length - 1];
-      setPendingGameInvite(latestInvite.gameInvitation || null);
-      setShowInviteMessage(true);
+      
+      // Check if this invitation status is still pending in the database
+      const checkInviteStatus = async () => {
+        try {
+          if (latestInvite.gameInvitation?.id) {
+            const inviteDoc = await getDoc(doc(db, 'gameInvitations', latestInvite.gameInvitation.id));
+            if (inviteDoc.exists() && inviteDoc.data().status === 'pending') {
+              setPendingGameInvite(latestInvite.gameInvitation);
+              setShowInviteMessage(true);
+            } else {
+              // Invitation was already handled
+              setPendingGameInvite(null);
+              setShowInviteMessage(false);
+            }
+          }
+        } catch (error) {
+          console.error('Error checking invitation status:', error);
+        }
+      };
+      
+      checkInviteStatus();
     } else {
       setPendingGameInvite(null);
       setShowInviteMessage(false);
@@ -283,9 +323,11 @@ export default function Chat() {
       // Clear the message input right away
       setNewMessage('');
       
+      console.log("Sending message to chatId:", chatId);
+      
       // Add message to Firestore
       await addDoc(collection(db, 'messages'), {
-        chatId,
+        chatId: chatId,
         senderId: currentUser.uid,
         text: newMessage.trim(),
         timestamp: serverTimestamp()
@@ -306,9 +348,9 @@ export default function Chat() {
   };
   
   // Handle game invitation
-  const handleGameInvite = async (gameType: 'tictactoe' | 'connect4' | 'wordgame') => {
+  const handleGameInvite = async (gameType: 'truth-or-lie' | 'word-chain' | 'proverbs' | 'riddles') => { // Updated game types
     if (!currentUser || !otherUser || !chatId) return;
-    
+
     try {
       // Create a game invitation
       const invitationData = {
@@ -322,7 +364,7 @@ export default function Chat() {
       
       // Add invitation to Firestore
       const inviteRef = await addDoc(collection(db, 'gameInvitations'), invitationData);
-      
+
       // Send a message about the invitation
       await addDoc(collection(db, 'messages'), {
         chatId,
@@ -335,39 +377,113 @@ export default function Chat() {
         },
         timestamp: serverTimestamp()
       });
-      
+
       setShowGameMenu(false);
+
+      // Add notification of invitation sent
+      alert(`Game invitation sent to ${isAnonymousChat ? 'Anonymous User' : otherUser.displayName}. Waiting for response.`);
     } catch (error) {
       console.error('Error sending game invitation:', error);
     }
   };
-  
+
   // Handle accepting a game invitation
   const acceptGameInvitation = async () => {
     if (!currentUser || !chatId || !pendingGameInvite) return;
-    
+
     try {
-      // Update invitation status
-      const inviteRef = doc(db, 'gameInvitations', pendingGameInvite.id);
-      await updateDoc(inviteRef, {
-        status: 'accepted'
+      // Hide invitation UI immediately for better UX
+      setShowInviteMessage(false);
+
+      // Determine player roles
+      const player1 = pendingGameInvite.senderId; // Initiator
+      const player2 = currentUser.uid;           // Accepter
+
+      // Initialize gameData based on gameType
+      let initialGameData = {};
+      switch (pendingGameInvite.gameType) {
+        case 'truth-or-lie':
+          initialGameData = {
+            rounds: [],
+            currentRound: 0,
+            maxRounds: 5, // Default max rounds
+            scores: { [player1]: 0, [player2]: 0 },
+            roundPhase: 'submitting',
+            playerMakingStatements: player1, // Game initiator (P1) starts by making statements
+            playerGuessing: player2,         // Accepter (P2) will be the first to guess
+          };
+          break;
+        case 'word-chain':
+          initialGameData = {
+            words: [],
+            lastWord: null,
+            usedWords: [],
+            scores: { [player1]: 0, [player2]: 0 }
+          };
+          break;
+        case 'proverbs':
+          initialGameData = {
+            proverbsList: [], // Will be populated from PROVERBS constant in Games.tsx or dynamically
+            currentProverbIndex: null,
+            score: { [player1]: 0, [player2]: 0 }
+          };
+          break;
+        case 'riddles':
+          initialGameData = {
+            riddlesList: [], // Will be populated from RIDDLES constant in Games.tsx or dynamically
+            currentRiddleIndex: null,
+            score: { [player1]: 0, [player2]: 0 }
+          };
+          break;
+        default:
+          initialGameData = {};
+      }
+
+      // 1. Create game session first to get its ID
+      const gameSessionRef = await addDoc(collection(db, 'gameSessions'), {
+        gameType: pendingGameInvite.gameType,
+        player1: player1, 
+        player2: player2, 
+        chatId: chatId,
+        status: 'active',
+        currentTurn: player1, // Game creator (original inviter) goes first
+        createdAt: serverTimestamp(),
+        gameData: initialGameData,
+        lastMoveAt: serverTimestamp()
       });
       
-      // Send acceptance message
+      // 2. Update invitation status and add gameSessionId to the invitation document
+      const inviteRef = doc(db, 'gameInvitations', pendingGameInvite.id);
+      await updateDoc(inviteRef, {
+        status: 'accepted',
+        gameSessionId: gameSessionRef.id // Save game session ID to the invitation doc
+      });
+
+      // 3. Send acceptance message with all necessary gameInvitation details
       await addDoc(collection(db, 'messages'), {
         chatId,
-        senderId: currentUser.uid,
-        text: `I've accepted the invitation to play ${gameTypeToName(pendingGameInvite.gameType)}!`,
+        senderId: currentUser.uid, // The user who accepted sends this message
+        text: `I've accepted the invitation to play ${gameTypeToName(pendingGameInvite.gameType)}! Let's play!`,
         type: 'gameInvitationAccepted',
+        gameInvitation: { // Construct the payload carefully
+          id: pendingGameInvite.id, // ID of the invitation document
+          gameType: pendingGameInvite.gameType,
+          senderId: pendingGameInvite.senderId, // Original inviter
+          recipientId: currentUser.uid, // Accepter
+          chatId: pendingGameInvite.chatId,
+          status: 'accepted',
+          gameSessionId: gameSessionRef.id // Crucial: ID of the created game session
+        },
         timestamp: serverTimestamp()
       });
       
-      // Start the game
-      setActiveGame(pendingGameInvite.gameType);
+      // 4. Redirect the accepter to the games page
+      navigate(`/games/${gameSessionRef.id}`);
+
       setPendingGameInvite(null);
-      setShowInviteMessage(false);
     } catch (error) {
       console.error('Error accepting game invitation:', error);
+      setShowInviteMessage(true); // Show invitation again if there's an error
     }
   };
   
@@ -376,6 +492,9 @@ export default function Chat() {
     if (!currentUser || !chatId || !pendingGameInvite) return;
     
     try {
+      // Hide invitation UI immediately for better UX
+      setShowInviteMessage(false);
+      
       // Update invitation status
       const inviteRef = doc(db, 'gameInvitations', pendingGameInvite.id);
       await updateDoc(inviteRef, {
@@ -386,24 +505,85 @@ export default function Chat() {
       await addDoc(collection(db, 'messages'), {
         chatId,
         senderId: currentUser.uid,
-        text: `Sorry, I don't want to play ${gameTypeToName(pendingGameInvite.gameType)} right now.`,
+        text: `Sorry, I can't play ${gameTypeToName(pendingGameInvite.gameType)} right now. Maybe later!`,
         type: 'gameInvitationDeclined',
+        gameInvitation: { // Attach the original invitation details
+          ...pendingGameInvite,
+          status: 'declined'
+        },
         timestamp: serverTimestamp()
       });
-      
+
       setPendingGameInvite(null);
-      setShowInviteMessage(false);
     } catch (error) {
       console.error('Error declining game invitation:', error);
+      setShowInviteMessage(true); // Show invitation again if there's an error
     }
   };
   
+  // Handle accepting music invitation
+  const handleAcceptMusicInvitation = async () => {
+    if (!chatId || !currentUser || !musicInviterId) return;
+
+    try {
+      const accepted = await acceptMusicInvitation(chatId, currentUser.uid, musicInviterId);
+      if (accepted) {
+        setShowMusicInvitation(false);
+        setShowMusicPlayer(true);
+      } else {
+        alert("Có lỗi xảy ra khi chấp nhận lời mời. Vui lòng thử lại.");
+      }
+    } catch (error) {
+      console.error('Error accepting music invitation:', error);
+      alert("Không thể chấp nhận lời mời. Vui lòng thử lại sau.");
+    }
+  };
+
+  // Handle declining music invitation
+  const handleDeclineMusicInvitation = async () => {
+    if (!chatId || !currentUser || !musicInviterId) return;
+    
+    try {
+      //@ts-ignore
+      await declineMusicInvitation(chatId, currentUser.uid, musicInviterId);
+      setShowMusicInvitation(false);
+    } catch (error) {
+      console.error('Error declining music invitation:', error);
+      alert("Không thể từ chối lời mời. Vui lòng thử lại sau.");
+    } finally {
+      setShowMusicInvitation(false);
+    }
+  };
+
+  // Check music invitations periodically
+  useEffect(() => {
+    if (!chatId || !currentUser) return;
+
+    const checkMusicInvite = async () => {
+      try {
+        const invitation = await checkMusicInvitation(chatId, currentUser.uid);
+        if (invitation.isPending && invitation.inviterId) {
+          setMusicInviterId(invitation.inviterId);
+          setShowMusicInvitation(true);
+        }
+      } catch (error) {
+        console.error('Error checking music invitations:', error);
+      }
+    };
+
+    checkMusicInvite();
+    const intervalId = setInterval(checkMusicInvite, 10000); // kiểm tra mỗi 10 giây
+
+    return () => clearInterval(intervalId);
+  }, [chatId, currentUser]);
+
   // Helper function to convert game type to display name
   const gameTypeToName = (type: string): string => {
     switch (type) {
-      case 'tictactoe': return 'Tic Tac Toe';
-      case 'connect4': return 'Connect 4';
-      case 'wordgame': return 'Word Game';
+      case 'truth-or-lie': return 'Truth or Lie';
+      case 'word-chain': return 'Word Chain';
+      case 'proverbs': return 'Proverbs Game';
+      case 'riddles': return 'Riddles & Puzzles';
       default: return 'a game';
     }
   };
@@ -419,6 +599,31 @@ export default function Chat() {
       return '';
     }
     return timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  // Toggle reaction for a message
+  const handleToggleReaction = async (messageId: string, emoji: string) => {
+    if (!currentUser || !messageId) return;
+    try {
+      const msgRef = doc(db, 'messages', messageId);
+      const msgSnap = await getDoc(msgRef);
+      if (!msgSnap.exists()) return;
+      const data = msgSnap.data();
+      const reactions = data.reactions || {};
+      const userList: string[] = reactions[emoji] || [];
+      let newReactions = { ...reactions };
+      if (userList.includes(currentUser.uid)) {
+        // Remove reaction
+        newReactions[emoji] = userList.filter((uid) => uid !== currentUser.uid);
+        if (newReactions[emoji].length === 0) delete newReactions[emoji];
+      } else {
+        // Add reaction
+        newReactions[emoji] = [...userList, currentUser.uid];
+      }
+      await updateDoc(msgRef, { reactions: newReactions });
+    } catch (e) {
+      console.error('Failed to toggle reaction:', e);
+    }
   };
 
   // Render loading state
@@ -441,10 +646,10 @@ export default function Chat() {
           <div>Logged in: {currentUser ? 'Yes' : 'No'}</div>
           <div>Other user loaded: {otherUser ? 'Yes' : 'No'}</div>
         </div>
-        <Link to="/chat" className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
-          Back to Chats
-        </Link>
-      </div>
+          <Link to="/chat" className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+            Back to Chats
+          </Link>
+        </div>
     );
   }
 
@@ -453,7 +658,7 @@ export default function Chat() {
     return (
       <div className="flex flex-col h-screen">
         {/* Chat header */}
-        <div className="bg-white border-b shadow-sm p-4 flex justify-between items-center">
+        <div className="bg-white border-b shadow-sm p-4 flex justify-between items-center sticky top-0 z-10">
           <div className="flex items-center">
             <Link to="/chat" className="mr-4">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -479,170 +684,293 @@ export default function Chat() {
             </div>
           </div>
           <div className="flex items-center">
-            <button
-              onClick={handleEndGame}
-              className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md flex items-center mr-3"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-              </svg>
-              End Game
-            </button>
-            <div>
+            <div className="relative">
               <button
                 onClick={() => setShowGameMenu(!showGameMenu)}
-                className="flex items-center px-3 py-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-lg transition-colors"
+                className="flex items-center px-3 py-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-lg transition-colors mr-2"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
                 </svg>
                 Play Games
               </button>
+              
+              {/* Game menu dropdown - đã xóa Word Chain và Proverbs Game */}
               {showGameMenu && (
-                <div className="absolute right-5 mt-2 bg-white border rounded-lg shadow-lg z-10 w-48">
-                  <h3 className="px-4 py-2 text-sm font-medium text-gray-700 border-b">Choose a game</h3>
+                <div className="absolute right-0 mt-2 bg-white border rounded-lg shadow-lg z-20 w-56">
+                  <h3 className="px-4 py-2 text-sm font-medium text-gray-700 border-b">Choose a language game</h3>
                   <ul>
-                    <li className="px-4 py-2 hover:bg-indigo-50 cursor-pointer flex items-center" onClick={() => handleGameInvite('tictactoe')}>
+                    <li 
+                      className="px-4 py-2 hover:bg-indigo-50 cursor-pointer flex items-center" 
+                      onClick={() => {
+                        handleGameInvite('truth-or-lie');
+                        setShowGameMenu(false);
+                      }}
+                    >
                       <span className="bg-indigo-100 text-indigo-700 p-1 rounded mr-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2h-4M9 3V1m0 2v2m0-2h6M9 3H6m3 0V1" />
                         </svg>
                       </span>
-                      Tic Tac Toe
+                      Truth or Lie
                     </li>
-                    <li className="px-4 py-2 hover:bg-indigo-50 cursor-pointer flex items-center" onClick={() => handleGameInvite('connect4')}>
-                      <span className="bg-blue-100 text-blue-700 p-1 rounded mr-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16z" clipRule="evenodd" />
+                    <li 
+                      className="px-4 py-2 hover:bg-yellow-50 cursor-pointer flex items-center"
+                      onClick={() => {
+                        handleGameInvite('riddles');
+                        setShowGameMenu(false);
+                      }}
+                    >
+                      <span className="bg-yellow-100 text-yellow-700 p-1 rounded mr-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
                       </span>
-                      Connect 4
-                    </li>
-                    <li className="px-4 py-2 hover:bg-indigo-50 cursor-pointer flex items-center" onClick={() => handleGameInvite('wordgame')}>
-                      <span className="bg-green-100 text-green-700 p-1 rounded mr-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
-                        </svg>
-                      </span>
-                      Word Game
+                      Riddles & Puzzles
                     </li>
                   </ul>
                 </div>
               )}
             </div>
+            
+            <button
+              onClick={() => setShowMusicPlayer(true)}
+              className="flex items-center px-3 py-2 bg-purple-100 hover:bg-purple-200 text-purple-800 rounded-lg transition-colors mr-2"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+              </svg>
+              Music
+            </button>
           </div>
         </div>
 
-        <div className="flex flex-1 overflow-hidden">
-          {/* Game panel */}
-          <div className="w-2/3 overflow-y-auto p-2">
-            <ChatGames
-              gameType={activeGame}
-              onEndGame={handleEndGame}
-              currentUser={currentUser}
-              otherUser={otherUser}
-              chatId={chatId}
-            />
-          </div>
-          
-          {/* Chat panel */}
-          <div className="w-1/3 flex flex-col border-l">
-            {/* Game invitation */}
-            {showInviteMessage && pendingGameInvite && (
-              <div className="bg-blue-50 p-4 flex flex-col items-center">
-                <div className="mb-2 text-center">
-                  <p className="font-medium">Game Invitation: {gameTypeToName(pendingGameInvite.gameType)}</p>
-                  <p className="text-sm text-gray-600">Do you want to play?</p>
-                </div>
-                <div className="flex">
-                  <button
-                    onClick={acceptGameInvitation}
-                    className="bg-green-500 text-white px-4 py-1 rounded mr-2 hover:bg-green-600"
-                  >
-                    Accept
-                  </button>
-                  <button
-                    onClick={declineGameInvitation}
-                    className="bg-red-500 text-white px-4 py-1 rounded hover:bg-red-600"
-                  >
-                    Decline
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Messages container */}
-            <div className="flex-1 p-2 overflow-y-auto bg-gray-50">
-              {messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-gray-400 text-center">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                  </svg>
-                  <p>No messages yet</p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {messages.map((message) => (
-                    <div
-                      key={message.id}
-                      className={`flex ${message.senderId === currentUser.uid ? 'justify-end' : 'justify-start'}`}
-                    >
-                      <div
-                        className={`max-w-full px-3 py-2 rounded-lg text-sm ${
-                          message.senderId === currentUser.uid
-                            ? 'bg-blue-500 text-white rounded-br-none'
-                            : 'bg-white border rounded-bl-none'
-                        }`}
-                      >
-                        {message.text}
-                        <div
-                          className={`text-xs mt-1 ${
-                            message.senderId === currentUser.uid ? 'text-blue-100' : 'text-gray-500'
-                          }`}
-                        >
-                          {message.timestamp ? formatTime(message.timestamp) : ''}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                  <div ref={messagesEndRef} />
-                </div>
-              )}
+        {/* Game invitation */}
+        {showInviteMessage && pendingGameInvite && (
+          <div className="bg-blue-50 p-4 flex items-center justify-between sticky top-[72px] z-10 border-b border-blue-100">
+            <div>
+              <p className="font-medium">Game Invitation: {gameTypeToName(pendingGameInvite.gameType)}</p>
+              <p className="text-sm text-gray-600">Do you want to play?</p>
             </div>
+            <div className="flex space-x-2">
+              <button
+                onClick={acceptGameInvitation}
+                className="bg-green-500 text-white px-4 py-1 rounded hover:bg-green-600 transition-colors"
+              >
+                Accept
+              </button>
+              <button
+                onClick={declineGameInvitation}
+                className="bg-red-500 text-white px-4 py-1 rounded hover:bg-red-600 transition-colors"
+              >
+                Decline
+              </button>
+            </div>
+          </div>
+        )}
 
-            {/* Message input */}
-            <form onSubmit={handleSendMessage} className="bg-white border-t p-2">
-              <div className="flex items-center">
-                <textarea
-                  className="flex-1 border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                  placeholder="Type a message..."
-                  value={newMessage}
-                  onChange={(e) => setNewMessage(e.target.value)}
-                  rows={1}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage(e);
-                    }
-                  }}
-                />
+        {/* Active game area */}
+        {activeGame && (
+          <div className="flex-1 overflow-y-auto p-4 bg-gray-100">
+            <div className="bg-white rounded-lg shadow p-4 mb-4">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-medium text-gray-900">
+                  {gameTypeToName(activeGame)}
+                </h3>
                 <button
-                  type="submit"
-                  disabled={!newMessage.trim()}
-                  className={`ml-1 rounded-full p-1.5 ${
-                    newMessage.trim()
-                      ? 'bg-blue-500 hover:bg-blue-600 text-white'
-                      : 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                  }`}
+                  onClick={handleEndGame}
+                  className="bg-red-100 text-red-600 px-3 py-1 rounded-md hover:bg-red-200"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-                  </svg>
+                  End Game
                 </button>
               </div>
-            </form>
+              <ChatGames
+                gameType={activeGame}
+                onEndGame={handleEndGame}
+                currentUser={currentUser}
+                otherUser={otherUser}
+                chatId={chatId}
+              />
+            </div>
           </div>
+        )}
+
+        {/* Messages container */}
+        <div className={`flex-1 p-4 overflow-y-auto bg-gray-50 ${activeGame ? 'hidden md:block' : ''}`}>
+          {messages.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-gray-400">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+              <p>No messages yet. Start the conversation!</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {messages.map((message) => (
+                <div
+                  key={message.id}
+                  className={`flex ${message.senderId === currentUser.uid ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    className={`max-w-xs md:max-w-md lg:max-w-lg px-4 py-2 rounded-lg shadow-sm ${
+                      message.senderId === currentUser.uid
+                        ? 'bg-blue-500 text-white rounded-br-none'
+                        : 'bg-white border rounded-bl-none'
+                    }`}
+                  >
+                    <p className="whitespace-pre-wrap">{message.text}</p>
+                    {/* For the original inviter: Show "Join Game" button when invitation is accepted by the other user */}
+                    {message.type === 'gameInvitationAccepted' &&
+                      message.gameInvitation &&
+                      message.gameInvitation.senderId === currentUser.uid && // Current user is the original inviter
+                      message.gameInvitation.gameSessionId && (
+                        <button
+                          onClick={() => navigate(`/games/${message.gameInvitation!.gameSessionId}`)}
+                          className="mt-2 w-full bg-green-500 text-white px-3 py-1.5 rounded hover:bg-green-600 text-sm font-semibold transition-colors"
+                        >
+                          Join Game
+                        </button>
+                      )}
+                    {/* Reactions UI */}
+                    <div className="flex flex-wrap gap-1 mt-2 items-center">
+                      {message.reactions &&
+                        Object.entries(message.reactions).map(([emoji, userIds]) => (
+                          <button
+                            key={emoji}
+                            className={`flex items-center px-2 py-0.5 rounded-full text-sm border ${userIds.includes(currentUser.uid) ? 'bg-blue-100 border-blue-300' : 'bg-gray-100 border-gray-200'} hover:bg-blue-200 transition-colors`}
+                            onClick={() => handleToggleReaction(message.id!, emoji)}
+                            title={userIds.length === 1 ? '1 person reacted' : `${userIds.length} people reacted`}
+                          >
+                            <span>{emoji}</span>
+                            <span className="ml-1">{userIds.length}</span>
+                          </button>
+                        ))}
+                      {/* Add reaction button */}
+                      <div className="relative">
+                        <button
+                          className="px-2 py-0.5 rounded-full bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm"
+                          onClick={() => setShowReactionPicker(showReactionPicker === message.id ? null : (message.id || null))}
+                          title="Add reaction"
+                          type="button"
+                        >
+                          +
+                        </button>
+                        {showReactionPicker === message.id && (
+                          <div className="absolute z-30 mt-1 left-0 bg-white border rounded shadow-lg flex flex-row p-1 space-x-1 max-w-[300] overflow-x-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100" style={{ WebkitOverflowScrolling: 'touch' }}>
+                            {REACTION_EMOJIS.map((emoji) => (
+                              <button
+                                key={emoji}
+                                className="text-xl p-1 hover:bg-blue-100 rounded"
+                                onClick={() => {
+                                  handleToggleReaction(message.id!, emoji);
+                                  setShowReactionPicker(null);
+                                }}
+                                type="button"
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div
+                      className={`text-xs mt-1 ${
+                        message.senderId === currentUser.uid ? 'text-blue-100' : 'text-gray-500'
+                      } ${message.type === 'gameInvitationAccepted' && message.gameInvitation && message.gameInvitation.senderId === currentUser.uid ? 'text-right' : ''}`}
+                    >
+                      {message.timestamp ? formatTime(message.timestamp) : ''}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
         </div>
+
+        {/* Chat suggestions - Sửa ở đây để hiển thị gợi ý mọi lúc, không chỉ khi không có tin nhắn */}
+        {!activeGame && otherUser && (
+          <div className="px-4 pb-2">
+            <ChatSuggestions
+              isAnonymousChat={isAnonymousChat}
+              otherUserName={otherUser.displayName || "User"}
+              sharedInterests={sharedInterests}
+              onSuggestionSelect={(text) => setNewMessage(text)}
+              recentMessages={messages.slice(-5).map(m => 
+                `${m.senderId === currentUser?.uid ? 'Tôi' : otherUser?.displayName || 'Bạn'}: ${m.text}`
+              )}
+            />
+          </div>
+        )}
+
+        {/* Ice breaker modal */}
+        {showIceBreakerModal && currentUser && otherUser && (
+          <IceBreakerModal
+            chatId={chatId}
+            currentUserId={currentUser.uid}
+            otherUserName={isAnonymousChat ? "Anonymous User" : otherUser.displayName || "User"}
+            sharedInterests={sharedInterests}
+            onClose={() => setShowIceBreakerModal(false)}
+            onMessageSent={() => {
+              // Close the modal and don't need to set message as it's already sent to Firebase
+              setShowIceBreakerModal(false);
+            }}
+          />
+        )}
+
+        {/* Music Player Modal */}
+        {showMusicPlayer && currentUser && chatId && otherUser && (
+          //@ts-ignore
+          <MusicPlayer 
+            chatId={chatId}
+            currentUserId={currentUser.uid}
+            otherUserId={otherUser.uid}
+            otherUserName={otherUser.displayName || "User"}
+            onClose={() => setShowMusicPlayer(false)}
+          />
+        )}
+
+        {/* Music Invitation Modal */}
+        {showMusicInvitation && currentUser && otherUser && musicInviterId && (
+          <MusicInvitationModal
+            inviterName={musicInviterId === otherUser.uid ? (otherUser.displayName || 'Người dùng khác') : 'Người dùng khác'}
+            onAccept={handleAcceptMusicInvitation}
+            onDecline={handleDeclineMusicInvitation}
+          />
+        )}
+
+        {/* Message input */}
+        <form onSubmit={handleSendMessage} className="bg-white border-t p-4 sticky bottom-0 z-10">
+          <div className="flex items-center">
+            <textarea
+              className="flex-1 border rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              placeholder="Type a message..."
+              value={newMessage}
+              onChange={(e) => setNewMessage(e.target.value)}
+              rows={1}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendMessage(e);
+                }
+              }}
+            />
+            <button
+              type="submit"
+              disabled={!newMessage.trim()}
+              className={`ml-2 rounded-full p-2 ${
+                newMessage.trim()
+                  ? 'bg-blue-500 hover:bg-blue-600 text-white'
+                  : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+              }`}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+              </svg>
+            </button>
+          </div>
+        </form>
       </div>
     );
   }
@@ -650,8 +978,8 @@ export default function Chat() {
   // Main chat UI
   return (
     <div className="flex flex-col h-screen">
-      {/* Chat header */}
-      <div className="bg-white border-b shadow-sm p-4 flex justify-between items-center">
+      {/* Chat header - Making it sticky */}
+      <div className="bg-white border-b shadow-sm p-4 flex justify-between items-center sticky top-0 z-10">
         <div className="flex items-center">
           <Link to="/chat" className="mr-4">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -677,53 +1005,84 @@ export default function Chat() {
           </div>
         </div>
         <div className="flex items-center">
+          <div className="relative">
+            <button
+              onClick={() => setShowGameMenu(!showGameMenu)}
+              className="flex items-center px-3 py-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-lg transition-colors mr-2"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
+              </svg>
+              Play Games
+            </button>
+            
+            {/* Game menu dropdown - đã xóa Word Chain và Proverbs Game */}
+            {showGameMenu && (
+              <div className="absolute right-0 mt-2 bg-white border rounded-lg shadow-lg z-20 w-56">
+                <h3 className="px-4 py-2 text-sm font-medium text-gray-700 border-b">Choose a language game</h3>
+                <ul>
+                  <li 
+                    className="px-4 py-2 hover:bg-indigo-50 cursor-pointer flex items-center" 
+                    onClick={() => {
+                      handleGameInvite('truth-or-lie');
+                      setShowGameMenu(false);
+                    }}
+                  >
+                    <span className="bg-indigo-100 text-indigo-700 p-1 rounded mr-2">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2h-4M9 3V1m0 2v2m0-2h6M9 3H6m3 0V1" />
+                      </svg>
+                    </span>
+                    Truth or Lie
+                  </li>
+                  <li 
+                    className="px-4 py-2 hover:bg-yellow-50 cursor-pointer flex items-center"
+                    onClick={() => {
+                      handleGameInvite('riddles');
+                      setShowGameMenu(false);
+                    }}
+                  >
+                    <span className="bg-yellow-100 text-yellow-700 p-1 rounded mr-2">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </span>
+                    Riddles & Puzzles
+                  </li>
+                </ul>
+              </div>
+            )}
+          </div>
+          
           <button
-            onClick={() => setShowGameMenu(!showGameMenu)}
-            className="flex items-center px-3 py-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-lg transition-colors mr-2"
+            onClick={() => setShowMusicPlayer(true)}
+            className="flex items-center px-3 py-2 bg-purple-100 hover:bg-purple-200 text-purple-800 rounded-lg transition-colors mr-2"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
             </svg>
-            Play Games
-          </button>
-          <button
-            onClick={() => setShowContentSharing(!showContentSharing)}
-            className="flex items-center px-3 py-2 bg-green-100 hover:bg-green-200 text-green-800 rounded-lg transition-colors mr-2"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v16h16V4H4zm8 14H6v-4h6v4zm0-6H6V8h6v4zm8 6h-6v-4h6v4zm0-6h-6V8h6v4z" />
-            </svg>
-            Share Content
-          </button>
-          <button
-            onClick={() => setShowFriendshipJournal(!showFriendshipJournal)}
-            className="flex items-center px-3 py-2 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded-lg transition-colors"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-            </svg>
-            Friendship Journal
+            Music
           </button>
         </div>
       </div>
 
       {/* Game invitation */}
       {showInviteMessage && pendingGameInvite && (
-        <div className="bg-blue-50 p-4 flex items-center justify-between">
+        <div className="bg-blue-50 p-4 flex items-center justify-between sticky top-[72px] z-10 border-b border-blue-100">
           <div>
             <p className="font-medium">Game Invitation: {gameTypeToName(pendingGameInvite.gameType)}</p>
             <p className="text-sm text-gray-600">Do you want to play?</p>
           </div>
-          <div>
+          <div className="flex space-x-2">
             <button
               onClick={acceptGameInvitation}
-              className="bg-green-500 text-white px-4 py-1 rounded mr-2 hover:bg-green-600"
+              className="bg-green-500 text-white px-4 py-1 rounded hover:bg-green-600 transition-colors"
             >
               Accept
             </button>
             <button
               onClick={declineGameInvitation}
-              className="bg-red-500 text-white px-4 py-1 rounded hover:bg-red-600"
+              className="bg-red-500 text-white px-4 py-1 rounded hover:bg-red-600 transition-colors"
             >
               Decline
             </button>
@@ -731,8 +1090,34 @@ export default function Chat() {
         </div>
       )}
 
+      {/* Active game area */}
+      {activeGame && (
+        <div className="flex-1 overflow-y-auto p-4 bg-gray-100">
+          <div className="bg-white rounded-lg shadow p-4 mb-4">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-medium text-gray-900">
+                {gameTypeToName(activeGame)}
+              </h3>
+              <button
+                onClick={handleEndGame}
+                className="bg-red-100 text-red-600 px-3 py-1 rounded-md hover:bg-red-200"
+              >
+                End Game
+              </button>
+            </div>
+            <ChatGames
+              gameType={activeGame}
+              onEndGame={handleEndGame}
+              currentUser={currentUser}
+              otherUser={otherUser}
+              chatId={chatId}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Messages container */}
-      <div className="flex-1 p-4 overflow-y-auto bg-gray-50">
+      <div className={`flex-1 p-4 overflow-y-auto bg-gray-50 ${activeGame ? 'hidden md:block' : ''}`}>
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-400">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -748,17 +1133,72 @@ export default function Chat() {
                 className={`flex ${message.senderId === currentUser.uid ? 'justify-end' : 'justify-start'}`}
               >
                 <div
-                  className={`max-w-xs md:max-w-md lg:max-w-lg px-4 py-2 rounded-lg ${
+                  className={`max-w-xs md:max-w-md lg:max-w-lg px-4 py-2 rounded-lg shadow-sm ${
                     message.senderId === currentUser.uid
                       ? 'bg-blue-500 text-white rounded-br-none'
                       : 'bg-white border rounded-bl-none'
                   }`}
                 >
-                  {message.text}
+                  <p className="whitespace-pre-wrap">{message.text}</p>
+                  {/* For the original inviter: Show "Join Game" button when invitation is accepted by the other user */}
+                  {message.type === 'gameInvitationAccepted' &&
+                    message.gameInvitation &&
+                    message.gameInvitation.senderId === currentUser.uid && // Current user is the original inviter
+                    message.gameInvitation.gameSessionId && (
+                      <button
+                        onClick={() => navigate(`/games/${message.gameInvitation!.gameSessionId}`)}
+                        className="mt-2 w-full bg-green-500 text-white px-3 py-1.5 rounded hover:bg-green-600 text-sm font-semibold transition-colors"
+                      >
+                        Join Game
+                      </button>
+                    )}
+                  {/* Reactions UI */}
+                  <div className="flex flex-wrap gap-1 mt-2 items-center">
+                    {message.reactions &&
+                      Object.entries(message.reactions).map(([emoji, userIds]) => (
+                        <button
+                          key={emoji}
+                          className={`flex items-center px-2 py-0.5 rounded-full text-sm border ${userIds.includes(currentUser.uid) ? 'bg-blue-100 border-blue-300' : 'bg-gray-100 border-gray-200'} hover:bg-blue-200 transition-colors`}
+                          onClick={() => handleToggleReaction(message.id!, emoji)}
+                          title={userIds.length === 1 ? '1 person reacted' : `${userIds.length} people reacted`}
+                        >
+                          <span>{emoji}</span>
+                          <span className="ml-1">{userIds.length}</span>
+                        </button>
+                      ))}
+                    {/* Add reaction button */}
+                    <div className="relative">
+                      <button
+                        className="px-2 py-0.5 rounded-full bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm"
+                        onClick={() => setShowReactionPicker(showReactionPicker === message.id ? null : (message.id || null))}
+                        title="Add reaction"
+                        type="button"
+                      >
+                        +
+                      </button>
+                      {showReactionPicker === message.id && (
+                        <div className="absolute z-30 mt-1 left-0 bg-white border rounded shadow-lg flex flex-row p-1 space-x-1 max-w-[220px] overflow-x-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100" style={{ WebkitOverflowScrolling: 'touch' }}>
+                          {REACTION_EMOJIS.map((emoji) => (
+                            <button
+                              key={emoji}
+                              className="text-xl p-1 hover:bg-blue-100 rounded"
+                              onClick={() => {
+                                handleToggleReaction(message.id!, emoji);
+                                setShowReactionPicker(null);
+                              }}
+                              type="button"
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                   <div
                     className={`text-xs mt-1 ${
                       message.senderId === currentUser.uid ? 'text-blue-100' : 'text-gray-500'
-                    }`}
+                    } ${message.type === 'gameInvitationAccepted' && message.gameInvitation && message.gameInvitation.senderId === currentUser.uid ? 'text-right' : ''}`}
                   >
                     {message.timestamp ? formatTime(message.timestamp) : ''}
                   </div>
@@ -770,14 +1210,17 @@ export default function Chat() {
         )}
       </div>
 
-      {/* Chat suggestions for conversations with no messages */}
-      {messages.length === 0 && otherUser && (
-        <div className="px-4">
+      {/* Chat suggestions - Sửa ở đây để hiển thị gợi ý mọi lúc, không chỉ khi không có tin nhắn */}
+      {!activeGame && otherUser && (
+        <div className="px-4 pb-2">
           <ChatSuggestions
             isAnonymousChat={isAnonymousChat}
             otherUserName={otherUser.displayName || "User"}
             sharedInterests={sharedInterests}
             onSuggestionSelect={(text) => setNewMessage(text)}
+            recentMessages={messages.slice(-5).map(m => 
+              `${m.senderId === currentUser?.uid ? 'Tôi' : otherUser?.displayName || 'Bạn'}: ${m.text}`
+            )}
           />
         </div>
       )}
@@ -797,28 +1240,29 @@ export default function Chat() {
         />
       )}
 
-      {/* Content sharing modal */}
-      {showContentSharing && (
-        <ContentSharing
-          onClose={() => setShowContentSharing(false)}
-          currentUser={currentUser}
-          otherUser={otherUser}
+      {/* Music Player Modal */}
+      {showMusicPlayer && currentUser && chatId && otherUser && (
+       //@ts-ignore
+        <MusicPlayer 
           chatId={chatId}
+          currentUserId={currentUser.uid}
+          otherUserId={otherUser.uid}
+          otherUserName={otherUser.displayName || "User"}
+          onClose={() => setShowMusicPlayer(false)}
         />
       )}
 
-      {/* Friendship journal modal */}
-      {showFriendshipJournal && (
-        <FriendshipJournal
-          onClose={() => setShowFriendshipJournal(false)}
-          currentUser={currentUser}
-          otherUser={otherUser}
-          chatId={chatId}
+      {/* Music Invitation Modal */}
+      {showMusicInvitation && currentUser && otherUser && musicInviterId && (
+        <MusicInvitationModal
+          inviterName={musicInviterId === otherUser.uid ? (otherUser.displayName || 'Người dùng khác') : 'Người dùng khác'}
+          onAccept={handleAcceptMusicInvitation}
+          onDecline={handleDeclineMusicInvitation}
         />
       )}
 
       {/* Message input */}
-      <form onSubmit={handleSendMessage} className="bg-white border-t p-4">
+      <form onSubmit={handleSendMessage} className="bg-white border-t p-4 sticky bottom-0 z-10">
         <div className="flex items-center">
           <textarea
             className="flex-1 border rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"

@@ -3,8 +3,8 @@ import { useNavigate, Link } from 'react-router-dom';
 import dbService from '../services/dbService';
 
 const Login = () => {
-  const [email, setEmail] = useState('test@gmail.com');
-  const [password, setPassword] = useState('123456');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
@@ -23,7 +23,6 @@ const Login = () => {
       } catch (err) {
         console.error('Auto-login error:', err);
         setLoading(false);
-        // Silent fail for auto-login, user can still manually login
       }
     };
 

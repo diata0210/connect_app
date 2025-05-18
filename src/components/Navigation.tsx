@@ -8,6 +8,7 @@ const Navigation = () => {
   const [user, setUser] = useState<any>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false); // Thêm biến này
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -39,6 +40,7 @@ const Navigation = () => {
           navigate('/login');
         }
       }
+      setAuthChecked(true); // Đánh dấu đã check xong auth
     });
 
     // Cleanup subscription on unmount
@@ -54,6 +56,18 @@ const Navigation = () => {
       console.error("Error signing out:", error);
     }
   };
+
+  if (!authChecked) {
+    // Hiển thị skeleton hoặc loading để tránh flash header chưa login
+    return (
+      <nav className="fixed top-0 left-0 w-full z-50 bg-gradient-to-r from-indigo-700 to-purple-700 py-4 animate-pulse">
+        <div className="container mx-auto px-4 flex justify-between items-center">
+          <div className="h-8 w-32 bg-indigo-300 rounded-full" />
+          <div className="h-8 w-48 bg-indigo-300 rounded-full" />
+        </div>
+      </nav>
+    );
+  }
 
   return (
     <nav className={`fixed top-0 left-0 w-full z-50 transition-all duration-300 ${scrolled ? 'bg-white shadow-md py-2' : 'bg-gradient-to-r from-indigo-700 to-purple-700 py-4'}`}>
@@ -86,10 +100,7 @@ const Navigation = () => {
           {user && (
             <>
               <NavLink to="/" scrolled={scrolled}>Home</NavLink>
-              <NavLink to="/clubs" scrolled={scrolled}>Clubs</NavLink>
-              <NavLink to="/find-friends" scrolled={scrolled}>Find Friends</NavLink>
               <NavLink to="/random-match" scrolled={scrolled}>Random Match</NavLink>
-              <NavLink to="/games" scrolled={scrolled}>Games</NavLink>
               <NavLink to="/chat" scrolled={scrolled}>Chat</NavLink>
               
               <div className="flex items-center ml-4">

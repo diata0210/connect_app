@@ -37,6 +37,7 @@ const FriendRecommendations: React.FC<FriendRecommendationsProps> = ({
     // Fetch friend recommendations from the database
     const fetchRecommendations = async () => {
       try {
+        //@ts-ignore
         const recommendedUsers = await dbService.getFriendRecommendations(currentUser.uid, maxRecommendations);
         setRecommendations(recommendedUsers);
         setLoading(false);

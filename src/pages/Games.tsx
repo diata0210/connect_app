@@ -1,385 +1,948 @@
-import { useState } from 'react';
-// Game types and interfaces
-interface Question {
-  id: number;
+import React, { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { db, auth } from '../firebase';
+import { 
+  doc, 
+  getDoc, 
+  updateDoc, 
+  onSnapshot, 
+  collection, 
+  addDoc, 
+  serverTimestamp,
+  query,
+  where,
+  orderBy,
+  arrayUnion
+} from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
+import TruthOrLieGame from '../components/games/TruthOrLieGame';
+import RiddlesGame from '../components/games/RiddlesGame';
+
+// Define interfaces (ensure these are comprehensive and exported if used elsewhere
+export interface User {
+  uid: string;
+  displayName?: string;
+  email?: string;
+  photoURL?: string;
+}
+
+export interface Message {
+  id?: string;
+  gameSessionId: string;
+  senderId: string;
   text: string;
+  timestamp: any;
+  type?: 'chat' | 'system' | 'game'; // Added 'game' type
 }
 
-interface TwoTruthsOneLieGame {
-  statements: string[];
-  answer: number | null;
+export interface TruthLieRound {
+  playerMakingStatements: string;
+  statements: { text: string; isTruth: boolean }[];
+  guesser: string;
+  guess?: number; // Index of the guessed statement
+  isCorrect?: boolean;
 }
 
-const Games = () => {
-  const [activeGame, setActiveGame] = useState<string | null>(null);
-  
-  // Question Game
-  const [questions] = useState<Question[]>([
-    { id: 1, text: "If you could have dinner with anyone in the world, who would it be?" },
-    { id: 2, text: "What's your favorite place you've ever visited?" },
-    { id: 3, text: "What's one skill you wish you had?" },
-    { id: 4, text: "If you could live in any fictional world, which would you choose?" },
-    { id: 5, text: "What's something you're looking forward to this year?" },
-    { id: 6, text: "What was your childhood dream job?" },
-    { id: 7, text: "If you had to eat one food for the rest of your life, what would it be?" },
-    { id: 8, text: "What's the best piece of advice you've ever received?" },
-    { id: 9, text: "What's a hobby you've always wanted to try?" },
-    { id: 10, text: "What's your favorite way to spend a day off?" },
-  ]);
-  const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
+// Define specific data structures for each game type
+export interface TruthOrLieGameData {
+  rounds: TruthLieRound[];
+  currentRound: number;
+  maxRounds: number;
+  scores: { [playerId: string]: number };
+  playerMakingStatements?: string;
+  playerGuessing?: string;
+  submittedStatements?: { text: string; isTruth: boolean }[];
+  truthIndex?: number;
+  guessMade?: number;
+  roundPhase?: 'submitting' | 'guessing' | 'revealed';
+}
 
-  // Word Association Game
-  const [word, setWord] = useState<string>('');
-  const [previousWords, setPreviousWords] = useState<string[]>([]);
-  const [inputWord, setInputWord] = useState<string>('');
-  
-  // Two Truths and a Lie Game
-  const [twoTruthsGame, setTwoTruthsGame] = useState<TwoTruthsOneLieGame>({
-    statements: ['', '', ''],
-    answer: null
-  });
-  const [twoTruthsStep, setTwoTruthsStep] = useState<'setup' | 'play' | 'result'>('setup');
-  const [selectedLie, setSelectedLie] = useState<number | null>(null);
+export interface WordChainGameData {
+  words: Array<{ word: string; player: string }>; // Modified to track player
+  lastWord: string | null;
+  usedWords: string[];
+  currentPlayerInput?: string;
+  errorMessage?: string;
+  scores?: { [playerId: string]: number }; // Added scores
+}
 
-  // Function to start the question game
-  const startQuestionGame = () => {
-    setActiveGame('questions');
-    getRandomQuestion();
+export interface ProverbsGameData {
+  // The actual proverbs for the session might be populated from PROVERBS constant or dynamically
+  proverbsList: Array<{ start: string; end: string; hint?: string; completedBy?: string; isCorrect?: boolean; revealedEnd?: string }>;
+  currentProverbIndex: number | null;
+  score: { [playerId: string]: number };
+  currentAttempt?: string;
+  proverbRevealed?: boolean;
+}
+
+export interface RiddlesGameData {
+  // Thay đổi cấu trúc cho trò chơi riddle
+  currentRiddle: {
+    answer: string;
+    hints: string[];
+    createdBy: string;
+  } | null;
+  visibleHintCount: number; // Số lượng hints hiện đang hiển thị (1-3)
+  score: { [playerId: string]: number };
+  guessAttempts: number; // Số lần đã đoán trong vòng hiện tại
+  guessHistory: string[]; // Lịch sử các lần đoán trong vòng hiện tại
+  lastGuess?: {
+    guess: string;
+    playerId: string;
+    isCorrect: boolean;
+    pointsEarned: number;
+    creatorPoints: number; // Điểm người tạo câu đố nhận được nếu người đoán sai
+    hintsUsed: number; // Số gợi ý đã sử dụng
   };
+  riddleRevealed?: boolean;
+  pastRiddles: Array<{
+    answer: string;
+    hints: string[];
+    createdBy: string;
+    guessedBy?: string;
+    guessCorrect?: boolean;
+    pointsEarned?: number;
+    creatorPoints?: number; // Điểm người tạo câu đố nhận được
+    hintsUsed?: number; // Số gợi ý đã sử dụng
+    attempts?: number; // Số lần đoán đã sử dụng
+  }>;
+}
 
-  // Function to get a random question
-  const getRandomQuestion = () => {
-    const randomIndex = Math.floor(Math.random() * questions.length);
-    setCurrentQuestion(questions[randomIndex]);
-  };
+export interface GameSession {
+  id: string;
+  gameType: 'truth-or-lie' | 'word-chain' | 'proverbs' | 'riddles';
+  player1: string;
+  player2: string;
+  chatId: string;
+  status: 'active' | 'completed' | 'abandoned';
+  currentTurn: string;
+  createdAt: any; // Firestore Timestamp
+  lastMoveAt: any; // Firestore Timestamp
+  winner?: string;
+  gameData: TruthOrLieGameData | WordChainGameData | ProverbsGameData | RiddlesGameData | any; // Using 'any' as a fallback for flexibility during development
+}
 
-  // Function to start the word association game
-  const startWordAssociationGame = () => {
-    setActiveGame('word-association');
-    const startingWords = ['Friend', 'Travel', 'Music', 'Food', 'Book', 'Movie', 'Adventure'];
-    const randomWord = startingWords[Math.floor(Math.random() * startingWords.length)];
-    setWord(randomWord);
-    setPreviousWords([randomWord]);
-    setInputWord('');
-  };
+const Games: React.FC = () => {
+  const { sessionId: sessionIdFromRoute, gameType: gameTypeFromRoute } = useParams<{ sessionId?: string, gameType?: string }>();
+  const navigate = useNavigate();
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [opponent, setOpponent] = useState<User | null>(null);
+  const [gameSession, setGameSession] = useState<GameSession | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  // const [gameMessage, setGameMessage] = useState(''); // Commented out
+  const [gameMessages, setGameMessages] = useState<Message[]>([]);
+  // const [gameResult, setGameResult] = useState<'win' | 'loss' | 'draw' | null>(null); // Commented out
+  const [joinedGame, setJoinedGame] = useState(false);
 
-  // Function to submit a word in the word association game
-  const submitWord = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (inputWord.trim() === '') return;
+  // Game-specific states
+  //@ts-expect-error
+  const [truthLieStatements, setTruthLieStatements] = useState<string[]>(["", ""]); // Changed to two statements
+    //@ts-expect-error
+  const [truthLieTruthIndex, setTruthLieTruthIndex] = useState<number | null>(null);
+
+  const [riddleAnswer, setRiddleAnswer] = useState('');
+  const [showHint, setShowHint] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // const knownGameTypes = ["truth-or-lie", "word-chain", "proverbs-game", "riddles-game"];
+  // Corrected knownGameTypes to match GameSession gameType
+  const knownGameTypes = ["truth-or-lie", "word-chain", "proverbs", "riddles"];
+
+
+  let effectiveSessionId: string | undefined = sessionIdFromRoute;
+  let displayGameTypeInfo: string | undefined = undefined;
+
+  if (!sessionIdFromRoute && gameTypeFromRoute) {
+    if (knownGameTypes.includes(gameTypeFromRoute.toLowerCase())) {
+      displayGameTypeInfo = gameTypeFromRoute;
+      // Not a session, so ensure effectiveSessionId remains undefined
+      effectiveSessionId = undefined; 
+    } else {
+      // Assume it's a session ID passed via the /games/:gameType route
+      effectiveSessionId = gameTypeFromRoute;
+    }
+  }
+
+  // Authentication listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setCurrentUser({
+          uid: user.uid,
+          displayName: user.displayName || 'User',
+          email: user.email || '',
+          photoURL: user.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || 'User')}&background=random`
+        });
+      } else {
+        setCurrentUser(null);
+        navigate('/login');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [navigate]);
+
+  // Load game session data
+  useEffect(() => {
+    if (!effectiveSessionId || !currentUser) {
+      setGameSession(null); // Clear previous game session if any
+      if (!displayGameTypeInfo) { // Only stop loading if not expecting to show game info or session
+        setLoading(false);
+      }
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    const unsubscribe = onSnapshot(
+      doc(db, 'gameSessions', effectiveSessionId),
+      async (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          
+          // Set game session data
+          const gameData: GameSession = {
+            id: docSnap.id,
+            gameType: data.gameType,
+            player1: data.player1,
+            player2: data.player2,
+            chatId: data.chatId,
+            status: data.status,
+            currentTurn: data.currentTurn,
+            winner: data.winner,
+            gameData: data.gameData || {}, // Initialize gameData if not present
+            createdAt: data.createdAt,
+            lastMoveAt: data.lastMoveAt
+          };
+          
+          setGameSession(gameData);
+          
+          // Check if the current user is a player in this game
+          const isPlayer = data.player1 === currentUser.uid || data.player2 === currentUser.uid;
+          if (!isPlayer) {
+            setError("You are not authorized to join this game");
+            setLoading(false);
+            return;
+          }
+          
+          // Mark that this user has joined the game
+          if (!joinedGame) {
+            setJoinedGame(true);
+            
+            // Add notification to the game chat that this player has joined
+            await addDoc(collection(db, 'gameMessages'), {
+              gameSessionId: effectiveSessionId,
+              senderId: currentUser.uid,
+              text: `${currentUser.displayName} joined the game`,
+              timestamp: serverTimestamp(),
+              type: 'system'
+            });
+          }
+          
+          // Determine opponent
+          const opponentId = data.player1 === currentUser.uid ? data.player2 : data.player1;
+          
+          // Fetch opponent data
+          try {
+            const opponentDoc = await getDoc(doc(db, 'users', opponentId));
+            if (opponentDoc.exists()) {
+              const opponentData = opponentDoc.data();
+              setOpponent({
+                uid: opponentId,
+                displayName: opponentData.displayName || 'Opponent',
+                photoURL: opponentData.photoURL || `https://ui-avatars.com/api/?name=Opponent&background=random`
+              });
+            }
+          } catch (err) {
+            console.error('Error fetching opponent data:', err);
+          }
+          
+          setLoading(false);
+          
+          // Check if game is finished and calculate result
+          if (data.status === 'completed' && data.winner) {
+            if (data.winner === currentUser.uid) {
+              // setGameResult('win'); // Commented out
+            } else if (data.winner === 'draw') {
+              // setGameResult('draw'); // Commented out
+            } else {
+              // setGameResult('loss'); // Commented out
+            }
+          }
+        } else {
+          setError('Game session not found.');
+          setGameSession(null);
+          setLoading(false);
+        }
+      },
+      (err) => {
+        console.error('Error loading game session:', err);
+        setError('Failed to load game session');
+        setLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [effectiveSessionId, currentUser, joinedGame, displayGameTypeInfo]); // Added displayGameTypeInfo
+
+  // Load game chat messages
+  useEffect(() => {
+    if (!effectiveSessionId || !currentUser) {
+      setGameMessages([]); // Clear messages if no active session
+      return;
+    }
     
-    setPreviousWords([inputWord, ...previousWords]);
-    setWord(inputWord);
-    setInputWord('');
-  };
-
-  // Function to start the Two Truths and a Lie game
-  const startTwoTruthsGame = () => {
-    setActiveGame('two-truths');
-    setTwoTruthsGame({
-      statements: ['', '', ''],
-      answer: null
+    const messagesRef = collection(db, 'gameMessages');
+    const q = query(
+      messagesRef,
+      where('gameSessionId', '==', effectiveSessionId),
+      orderBy('timestamp', 'asc')
+    );
+    
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const msgs: Message[] = [];
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+        msgs.push({
+          id: doc.id,
+          gameSessionId: data.gameSessionId,
+          senderId: data.senderId,
+          text: data.text,
+          timestamp: data.timestamp, // Keep as Firestore Timestamp or convert to Date
+          type: data.type || 'chat'
+        });
+      });
+      
+      setGameMessages(msgs);
+      
+      // Scroll to bottom after a slight delay to ensure render is complete
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 100);
     });
-    setTwoTruthsStep('setup');
+    
+    return () => unsubscribe();
+  }, [effectiveSessionId, currentUser]);
+
+  // Scroll to bottom whenever messages update
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [gameMessages]);
+
+  // TRUTH OR LIE GAME FUNCTIONS
+  const handleTruthLieSubmit = async (statements: string[], truthIndex: number) => { // Accept parameters
+    if (!gameSession || !currentUser || !effectiveSessionId) return;
+    
+    // Use passed parameters for validation
+    if (statements.some(s => !s.trim()) || truthIndex === null) {
+      alert("Please fill in all statements and select which one is true.");
+      return;
+    }
+
+    console.log("handleTruthLieSubmit in Games.tsx called with:", statements, truthIndex);
+    
+    try {
+      const opponentId = gameSession.player1 === currentUser.uid ? gameSession.player2 : gameSession.player1;
+
+      // Create the new round data - ensure all fields have valid values (no undefined)
+      const newRound = {
+        playerMakingStatements: currentUser.uid,
+        statements: statements.map((text, index) => ({ text, isTruth: index === truthIndex })),
+        guesser: opponentId, // The opponent will guess
+        // Remove undefined values from the object
+        // We'll use null instead since Firestore accepts null but not undefined
+        guess: null,
+        isCorrect: null
+      };
+      
+      const gameSessionRef = doc(db, 'gameSessions', effectiveSessionId);
+      
+      // First check if the rounds array exists
+      const gameSessionSnap = await getDoc(gameSessionRef);
+      const sessionData = gameSessionSnap.data();
+      
+      // If rounds array doesn't exist yet, create it with set instead of using arrayUnion
+      if (!sessionData?.gameData?.rounds) {
+        await updateDoc(gameSessionRef, {
+          'gameData.rounds': [newRound],
+          'gameData.currentRound': 0, // First round
+          'gameData.playerMakingStatements': opponentId,
+          'gameData.playerGuessing': opponentId,  
+          'gameData.submittedStatements': statements.map((text, index) => ({ text, isTruth: index === truthIndex })),
+          'gameData.truthIndex': truthIndex,
+          'gameData.roundPhase': 'guessing',
+          currentTurn: opponentId,
+          lastMoveAt: serverTimestamp()
+        });
+      } else {
+        // If rounds array exists, use arrayUnion as before
+        await updateDoc(gameSessionRef, {
+          'gameData.rounds': arrayUnion(newRound),
+          'gameData.currentRound': (gameSession.gameData.currentRound || 0) + 1,
+          'gameData.playerMakingStatements': opponentId,
+          'gameData.playerGuessing': opponentId,
+          'gameData.submittedStatements': statements.map((text, index) => ({ text, isTruth: index === truthIndex })),
+          'gameData.truthIndex': truthIndex,
+          'gameData.roundPhase': 'guessing',
+          currentTurn: opponentId,
+          lastMoveAt: serverTimestamp()
+        });
+      }
+      
+      await addDoc(collection(db, 'gameMessages'), {
+        gameSessionId: effectiveSessionId,
+        senderId: currentUser.uid,
+        text: `${currentUser.displayName} has submitted their statements. It's ${opponent?.displayName || 'Opponent'}'s turn to guess!`,
+        timestamp: serverTimestamp(),
+        type: 'game'
+      });
+      
+      // Reset parent states
+      setTruthLieStatements(["", ""]);
+      setTruthLieTruthIndex(null);
+      
+    } catch (error) {
+      console.error('Error submitting truth or lie:', error);
+      alert("Failed to submit your statements. Please try again.");
+    }
+  };
+  
+  const handleTruthLieGuess = async (roundIndex: number, statementIndex: number) => {
+    if (!gameSession || !currentUser || !effectiveSessionId) return;
+    
+    try {
+      console.log("Making a guess:", roundIndex, statementIndex);
+      console.log("Game data:", gameSession.gameData);
+      
+      // Validate game data structure
+      if (!gameSession.gameData || !gameSession.gameData.rounds) {
+        console.error("Game data or rounds array not found");
+        alert("Error: Game data is incomplete. Please refresh the page and try again.");
+        return;
+      }
+      
+      // Ensure we're using the correct round index
+      const actualRoundIndex = typeof gameSession.gameData.currentRound === 'number' 
+        ? gameSession.gameData.currentRound - 1 // currentRound is 1-indexed, arrays are 0-indexed
+        : roundIndex;
+      
+      console.log("Using round index:", actualRoundIndex);
+      
+      // Check if round exists at the specified index
+      if (!gameSession.gameData.rounds[actualRoundIndex]) {
+        console.error(`Round not found at index ${actualRoundIndex}`);
+        console.error("Available rounds:", gameSession.gameData.rounds.length);
+        
+        // Try to use the last round if available
+        if (gameSession.gameData.rounds.length > 0) {
+          const lastRoundIndex = gameSession.gameData.rounds.length - 1;
+          console.log("Falling back to last round at index:", lastRoundIndex);
+          if (!gameSession.gameData.rounds[lastRoundIndex]) {
+            console.error("Last round not found either");
+            alert("Error: Round data not found. Please refresh the page and try again.");
+            return;
+          }
+        } else {
+          alert("Error: No rounds available. Please refresh the page and try again.");
+          return;
+        }
+      }
+      
+      const round = gameSession.gameData.rounds[actualRoundIndex];
+      console.log("Round data:", round);
+      
+      // Check if this round has already been guessed
+      if (round.guess !== undefined && round.guess !== null) {
+        console.log("Round already guessed");
+        return; // Prevent re-guessing
+      }
+      
+      // Find if statement at index is truth
+      if (!round.statements || !Array.isArray(round.statements)) {
+        console.error("Round statements are invalid:", round.statements);
+        alert("Error: Invalid round data. Please refresh the page and try again.");
+        return;
+      }
+      
+      const truthIndex = round.statements.findIndex((s: { text: string; isTruth: boolean }) => s.isTruth);
+      const isCorrect = statementIndex === truthIndex;
+      
+      console.log("Truth index:", truthIndex, "Guessed index:", statementIndex, "Is correct:", isCorrect);
+      
+      // Create new round data with the guess
+      const updatedRound = {
+        ...round,
+        guess: statementIndex,
+        isCorrect: isCorrect
+      };
+      
+      // Get current scores from gameData
+      const currentScores = gameSession.gameData.scores || { 
+        [gameSession.player1]: 0, 
+        [gameSession.player2]: 0 
+      };
+      
+      // Update score if the guess was correct
+      let updatedScores = { ...currentScores };
+      if (isCorrect) {
+        updatedScores[currentUser.uid] = (currentScores[currentUser.uid] || 0) + 1;
+      }
+      
+      // Update game session - use a different approach to update nested array objects
+      const gameSessionRef = doc(db, 'gameSessions', effectiveSessionId);
+      
+      // First, get all rounds and update the specific one we're changing
+      const allRounds = [...gameSession.gameData.rounds];
+      allRounds[actualRoundIndex] = updatedRound;
+      
+      // Reset to submitting phase for the next player after a guess
+      await updateDoc(gameSessionRef, {
+        'gameData.rounds': allRounds,
+        'gameData.scores': updatedScores,
+        'gameData.roundPhase': 'submitting', // Change to submitting for the next player
+        'gameData.playerMakingStatements': currentUser.uid, // Guesser becomes statement maker
+        'gameData.playerGuessing': round.playerMakingStatements, // Statement maker becomes guesser
+        'gameData.submittedStatements': null, // Clear previous statements
+        'gameData.truthIndex': null, // Clear previous truth index
+        currentTurn: currentUser.uid, // Switch turn to current user to make statements
+        lastMoveAt: serverTimestamp()
+      });
+      
+      // Add a game message about the guess
+      await addDoc(collection(db, 'gameMessages'), {
+        gameSessionId: effectiveSessionId,
+        senderId: currentUser.uid,
+        text: isCorrect 
+          ? `${currentUser.displayName} correctly guessed statement #${statementIndex + 1} was true! (+1 point)` 
+          : `${currentUser.displayName} guessed statement #${statementIndex + 1}, but the truth was statement #${truthIndex + 1}!`,
+        timestamp: serverTimestamp(),
+        type: 'game'
+      });
+      
+      // Check if this was the last round (e.g., maxRounds reached)
+      if (gameSession.gameData.currentRound >= (gameSession.gameData.maxRounds || 5)) {
+        // Count correct guesses for each player
+        const player1Score = updatedScores[gameSession.player1] || 0;
+        const player2Score = updatedScores[gameSession.player2] || 0;
+        
+        let winner = null;
+        if (player1Score > player2Score) {
+          winner = gameSession.player1;
+        } else if (player2Score > player1Score) {
+          winner = gameSession.player2;
+        } else {
+          winner = 'draw';
+        }
+        
+        // Update game status
+        await updateDoc(gameSessionRef, {
+          status: 'completed',
+          winner: winner
+        });
+      }
+      
+    } catch (error) {
+      console.error('Error making a guess:', error);
+      alert("Failed to submit your guess. Please try again.");
+    }
+  };
+  // RIDDLES GAME FUNCTIONS
+  const handleRiddleSubmit = async () => {
+    if (!gameSession || !currentUser || !effectiveSessionId) return;
+    
+    try {
+      const riddlesData = gameSession.gameData as RiddlesGameData;
+      const currentRiddle = riddlesData.currentRiddle;
+      const gameSessionRef = doc(db, 'gameSessions', effectiveSessionId);
+      
+      // Trường hợp đoán câu đố - chỉ xử lý khi người chơi hiện tại là người đoán
+      // và đã nhập câu trả lời
+      if (currentRiddle && gameSession.currentTurn === currentUser.uid && 
+          currentRiddle.createdBy !== currentUser.uid && riddleAnswer.trim()) {
+        
+        // Lấy thông tin về số lần đoán hiện tại
+        const currentAttempts = riddlesData.guessAttempts || 0;
+        
+        // Kiểm tra xem đã hết lượt đoán chưa
+        if (currentAttempts >= 5) {
+          alert("You've used all your guesses for this riddle.");
+          return;
+        }
+        
+        // Tăng số lần đoán và lưu lịch sử đoán
+        const newAttempts = currentAttempts + 1;
+        const guessHistory = [...(riddlesData.guessHistory || []), riddleAnswer.trim()];
+        
+        // Kiểm tra đáp án
+        const isCorrect = riddleAnswer.trim().toLowerCase() === currentRiddle.answer.toLowerCase();
+        
+        // Tính điểm dựa vào số lượng hints đã dùng nếu đoán đúng
+        const hintsUsed = riddlesData.visibleHintCount - 1; // visibleHintCount bắt đầu từ 1
+        const pointsEarned = isCorrect ? Math.max(4 - riddlesData.visibleHintCount, 1) : 0;
+        
+        // Nếu đoán đúng hoặc đã hết 5 lượt, hiển thị kết quả
+        if (isCorrect || newAttempts >= 5) {
+          // Nếu đã đoán sai 5 lần, tính điểm cho người tạo câu đố
+          let creatorPoints = 0;
+          if (!isCorrect) {
+            if (hintsUsed === 2) { // Đã dùng cả 2 gợi ý bổ sung
+              creatorPoints = 3;
+            } else if (hintsUsed === 1) { // Chỉ dùng 1 gợi ý bổ sung
+              creatorPoints = 2; 
+            } else if (hintsUsed === 0) { // Không dùng gợi ý nào
+              creatorPoints = 1;
+            }
+          }
+          
+          // Cập nhật điểm số
+          const scoreUpdate: any = {};
+          if (isCorrect) {
+            scoreUpdate[`gameData.score.${currentUser.uid}`] = (riddlesData.score?.[currentUser.uid] || 0) + pointsEarned;
+          } else if (creatorPoints > 0) {
+            scoreUpdate[`gameData.score.${currentRiddle.createdBy}`] = (riddlesData.score?.[currentRiddle.createdBy] || 0) + creatorPoints;
+          }
+          
+          // Cập nhật thông tin đoán
+          const lastGuess = {
+            guess: riddleAnswer,
+            playerId: currentUser.uid,
+            isCorrect: isCorrect,
+            pointsEarned: pointsEarned,
+            creatorPoints: creatorPoints,
+            hintsUsed: hintsUsed
+          };
+          
+          // Thêm vào lịch sử
+          const pastRiddle = {
+            ...currentRiddle,
+            guessedBy: currentUser.uid,
+            guessCorrect: isCorrect,
+            pointsEarned: pointsEarned,
+            creatorPoints: creatorPoints,
+            hintsUsed: hintsUsed,
+            attempts: newAttempts
+          };
+          
+          // Cập nhật game session
+          await updateDoc(gameSessionRef, {
+            'gameData.guessAttempts': newAttempts,
+            'gameData.guessHistory': guessHistory,
+            'gameData.lastGuess': lastGuess,
+            'gameData.riddleRevealed': true,
+            'gameData.pastRiddles': arrayUnion(pastRiddle),
+            ...scoreUpdate,
+          });
+          
+          // Thêm tin nhắn thông báo kết quả
+          const resultMessage = isCorrect
+            ? `${currentUser.displayName} correctly answered: "${riddleAnswer}" and earned ${pointsEarned} points!`
+            : `${currentUser.displayName} couldn't guess the answer after ${newAttempts} attempts. The answer was: "${currentRiddle.answer}"`;
+            
+          await addDoc(collection(db, 'gameMessages'), {
+            gameSessionId: effectiveSessionId,
+            senderId: currentUser.uid,
+            text: resultMessage,
+            timestamp: serverTimestamp(),
+            type: 'game'
+          });
+          
+          // Thêm tin nhắn về điểm của người tạo câu đố nếu có
+          if (creatorPoints > 0) {
+            const opponentName = opponent?.displayName || 'Opponent';
+            const creatorName = currentRiddle.createdBy === currentUser.uid ? 'You' : opponentName;
+            
+            await addDoc(collection(db, 'gameMessages'), {
+              gameSessionId: effectiveSessionId,
+              senderId: currentUser.uid,
+              text: `${creatorName} earned ${creatorPoints} points for creating a challenging riddle!`,
+              timestamp: serverTimestamp(),
+              type: 'game'
+            });
+          }
+          
+          // Sau một khoảng thời gian, chuyển lượt sang người đoán để họ tạo câu đố mới
+          // Sửa lại logic ở đây: chuyển lượt cho người vừa đoán (người hiện tại) để họ tạo câu đố mới
+          setTimeout(async () => {
+            await updateDoc(gameSessionRef, {
+              'gameData.currentRiddle': null,
+              'gameData.visibleHintCount': 1,
+              'gameData.riddleRevealed': true, // Vẫn giữ để hiển thị kết quả
+              'gameData.guessAttempts': 0 // Reset số lần đoán
+            });
+          }, 3000);
+          
+          setRiddleAnswer('');
+        } else {
+          // Nếu chưa đoán đúng và chưa hết lượt, chỉ cập nhật số lần đoán và lịch sử
+          await updateDoc(gameSessionRef, {
+            'gameData.guessAttempts': newAttempts,
+            'gameData.guessHistory': guessHistory
+          });
+          
+          // Thêm tin nhắn thông báo
+          await addDoc(collection(db, 'gameMessages'), {
+            gameSessionId: effectiveSessionId,
+            senderId: currentUser.uid,
+            text: `${currentUser.displayName} guessed: "${riddleAnswer}" (Attempt ${newAttempts}/5)`,
+            timestamp: serverTimestamp(),
+            type: 'game'
+          });
+          
+          setRiddleAnswer('');
+        }
+      } 
+    } catch (error) {
+      console.error('Error submitting riddle answer:', error);
+      alert("Failed to submit your answer. Please try again.");
+    }
   };
 
-  // Function to handle statement changes in Two Truths game
-  const handleStatementChange = (index: number, value: string) => {
-    const newStatements = [...twoTruthsGame.statements];
-    newStatements[index] = value;
-    setTwoTruthsGame({
-      ...twoTruthsGame,
-      statements: newStatements
-    });
+  // Cập nhật lại hàm tạo riddle để thêm các trường mới
+  const handleCreateRiddle = async (riddle: {answer: string, hints: string[]}) => {
+    if (!gameSession || !currentUser || !effectiveSessionId) return;
+    
+    try {
+      const gameSessionRef = doc(db, 'gameSessions', effectiveSessionId);
+      const opponentId = gameSession.player1 === currentUser.uid ? gameSession.player2 : gameSession.player1;
+      
+      // Tạo riddle mới
+      const newRiddle = {
+        answer: riddle.answer,
+        hints: riddle.hints,
+        createdBy: currentUser.uid
+      };
+      
+      // Cập nhật game session và chuyển lượt sang cho người đoán (đối thủ)
+      await updateDoc(gameSessionRef, {
+        'gameData.currentRiddle': newRiddle,
+        'gameData.visibleHintCount': 1,
+        'gameData.riddleRevealed': false,
+        'gameData.lastGuess': null,
+        'gameData.guessAttempts': 0, // Khởi tạo số lần đoán là 0
+        'gameData.guessHistory': [], // Khởi tạo lịch sử đoán là mảng rỗng
+        currentTurn: opponentId, // Chuyển lượt cho đối thủ để họ đoán
+        lastMoveAt: serverTimestamp()
+      });
+      
+      // Thêm tin nhắn thông báo
+      await addDoc(collection(db, 'gameMessages'), {
+        gameSessionId: effectiveSessionId,
+        senderId: currentUser.uid,
+        text: `${currentUser.displayName} has created a new riddle! It's ${opponent?.displayName || 'Opponent'}'s turn to guess (5 attempts allowed).`,
+        timestamp: serverTimestamp(),
+        type: 'game'
+      });
+      
+    } catch (error) {
+      console.error('Error creating riddle:', error);
+      alert("Failed to create your riddle. Please try again.");
+    }
+  };
+  
+  // Cập nhật lại hàm yêu cầu hint
+  const handleRequestHint = async () => {
+    if (!gameSession || !currentUser || !effectiveSessionId) return;
+    
+    try {
+      const riddlesData = gameSession.gameData as RiddlesGameData;
+      
+      // Kiểm tra giới hạn số lượng hints
+      if (riddlesData.visibleHintCount >= 3) {
+        alert("All hints have been revealed.");
+        return;
+      }
+      
+      // Tăng số lượng hints hiển thị
+      const gameSessionRef = doc(db, 'gameSessions', effectiveSessionId);
+      await updateDoc(gameSessionRef, {
+        'gameData.visibleHintCount': riddlesData.visibleHintCount + 1,
+      });
+      
+      // Thêm tin nhắn thông báo
+      await addDoc(collection(db, 'gameMessages'), {
+        gameSessionId: effectiveSessionId,
+        senderId: currentUser.uid,
+        text: `${currentUser.displayName} has requested another hint (${riddlesData.visibleHintCount + 1}/3).`,
+        timestamp: serverTimestamp(),
+        type: 'game'
+      });
+      
+    } catch (error) {
+      console.error('Error requesting hint:', error);
+      alert("Failed to request hint. Please try again.");
+    }
   };
 
-  // Function to set the lie in Two Truths game
-  const setLie = (index: number) => {
-    setTwoTruthsGame({
-      ...twoTruthsGame,
-      answer: index
-    });
-    setTwoTruthsStep('play');
+  // Handle abandoning the game
+  const handleAbandonGame = async () => {
+    if (!gameSession || !currentUser || !effectiveSessionId) return; // Add check for effectiveSessionId
+    
+    if (window.confirm('Are you sure you want to abandon the game? This will count as a loss.')) {
+      try {
+        // Update game session
+        await updateDoc(doc(db, 'gameSessions', effectiveSessionId), {
+          status: 'completed', // Mark as completed
+          winner: gameSession.player1 === currentUser.uid ? gameSession.player2 : gameSession.player1, // Opponent wins
+          lastMoveAt: serverTimestamp()
+        });
+        
+        // Navigate back to chat
+        navigate(`/chat/${gameSession.chatId}`);
+      } catch (error) {
+        console.error('Error abandoning game:', error);
+      }
+    }
   };
+  
+  // Game type to display name
+  // const getGameTypeName = (type: string | undefined) => {
+  //   if (!type) return "Game";
+  //   switch (type) {
+  //     case 'truth-or-lie':
+  //       return "Truth or Lie";
+  //     case 'word-chain':
+  //       return "Word Chain";
+  //     case 'proverbs':
+  //       return "Proverbs Game";
+  //     case 'riddles':
+  //       return "Riddles Game";
+  //     default:
+  //       return "Game";
+  //   }
+  // };
 
-  // Function to guess the lie in Two Truths game
-  const guessLie = (index: number) => {
-    setSelectedLie(index);
-    setTwoTruthsStep('result');
-  };
+  const renderGameContent = () => {
+    if (loading && !displayGameTypeInfo) { // Don't show loading for game info page if session is not primary
+      return (
+        <div className="flex justify-center items-center min-h-screen">
+          <div className="animate-spin rounded-full h-32 w-32 border-t-4 border-b-4 border-purple-600"></div>
+        </div>
+      );
+    }
 
-  // Function to reset all games
-  const resetGames = () => {
-    setActiveGame(null);
-    setCurrentQuestion(null);
-    setWord('');
-    setPreviousWords([]);
-    setInputWord('');
-    setTwoTruthsGame({
-      statements: ['', '', ''],
-      answer: null
-    });
-    setTwoTruthsStep('setup');
-    setSelectedLie(null);
+    if (error) {
+      return <div className="flex justify-center items-center min-h-screen text-red-500">Error: {error}</div>;
+    }
+
+    if (gameSession && currentUser) {
+      switch (gameSession.gameType) {
+        case 'truth-or-lie': // Corrected case
+          return <TruthOrLieGame 
+            gameSession={gameSession} 
+            currentUser={currentUser}
+            opponent={opponent} 
+            onTruthLieSubmit={handleTruthLieSubmit} // Pass the corrected handler
+            onTruthLieGuess={handleTruthLieGuess}
+            onAbandonGame={handleAbandonGame}
+          />;
+        case 'riddles': // Riddles case
+          return <RiddlesGame 
+            gameSession={gameSession} 
+            currentUser={currentUser}
+            opponent={opponent} 
+            answer={riddleAnswer}
+            setAnswer={setRiddleAnswer}
+            onSubmit={handleRiddleSubmit}
+            onShowHint={() => setShowHint(true)}
+            showHint={showHint}
+            onAbandonGame={handleAbandonGame}
+            onCreateRiddle={handleCreateRiddle}
+            onRequestHint={handleRequestHint}
+          />;
+        default:
+          return <div>Unsupported game type: {gameSession.gameType}</div>;
+      }
+    }
+
+    // Render Game Info Page
+    if (displayGameTypeInfo) {
+      return (
+        <div className="min-h-screen bg-gray-100 py-12 px-4 sm:px-6 lg:px-8 text-center">
+          <h1 className="text-3xl font-bold mb-4">About {displayGameTypeInfo.replace('-', ' ')}</h1>
+          <p>This page would contain information and rules about the {displayGameTypeInfo.replace('-', ' ')} game.</p>
+          <button onClick={() => navigate('/games')} className="mt-4 px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700">
+            Back to Game Lobby
+          </button>
+        </div>
+      );
+    }
+
+    // Fallback: Game Lobby (if no session ID and no specific game type info to display)
+    return (
+      <div className="p-4 md:p-8 min-h-screen bg-gradient-to-br from-purple-600 to-blue-500 text-white">
+        <h1 className="text-4xl font-bold mb-8 text-center">Game Lobby</h1>
+        <p className="text-lg mb-6 text-center">Select a game to view information or start a new session from a chat.</p>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {/* Truth or Lie Card */}
+          <div className="bg-white/20 backdrop-blur-md p-6 rounded-xl shadow-lg hover:shadow-2xl transition-shadow duration-300">
+            <h2 className="text-2xl font-semibold mb-3">Truth or Lie</h2>
+            <p className="text-sm mb-4">Challenge your friends to guess which of your statements is the truth!</p>
+            <button 
+              onClick={() => navigate('/games/truth-or-lie')} 
+              className="w-full bg-pink-500 hover:bg-pink-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-150"
+            >
+              View Game Info
+            </button>
+          </div>
+
+          {/* Word Chain Card */}
+          <div className="bg-white/20 backdrop-blur-md p-6 rounded-xl shadow-lg hover:shadow-2xl transition-shadow duration-300">
+            <h2 className="text-2xl font-semibold mb-3">Word Chain</h2>
+            <p className="text-sm mb-4">Link words together, starting with the last letter of the previous word.</p>
+            <button 
+              onClick={() => navigate('/games/word-chain')} 
+              className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-150"
+            >
+              View Game Info
+            </button>
+          </div>
+
+          {/* Proverbs Game Card */}
+          <div className="bg-white/20 backdrop-blur-md p-6 rounded-xl shadow-lg hover:shadow-2xl transition-shadow duration-300">
+            <h2 className="text-2xl font-semibold mb-3">Proverbs Game</h2>
+            <p className="text-sm mb-4">Complete well-known proverbs. How many can you get right?</p>
+            <button 
+              onClick={() => navigate('/games/proverbs')} 
+              className="w-full bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-150"
+            >
+              View Game Info
+            </button>
+          </div>
+
+          {/* Riddles Game Card */}
+          <div className="bg-white/20 backdrop-blur-md p-6 rounded-xl shadow-lg hover:shadow-2xl transition-shadow duration-300">
+            <h2 className="text-2xl font-semibold mb-3">Riddles Game</h2>
+            <p className="text-sm mb-4">Test your wits by solving challenging riddles.</p>
+            <button 
+              onClick={() => navigate('/games/riddles')} 
+              className="w-full bg-teal-500 hover:bg-teal-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-150"
+            >
+              View Game Info
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-12 text-center">
+          <button 
+            onClick={() => navigate('/chats')} 
+            className="bg-gray-700 hover:bg-gray-800 text-white font-semibold py-3 px-6 rounded-lg transition duration-150 text-lg"
+          >
+            Back to Chats
+          </button>
+        </div>
+      </div>
+    );
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 py-12">
-      <div className="container mx-auto px-4 max-w-4xl">
-        <h1 className="text-3xl font-bold text-gray-900 mb-8 text-center">Ice Breaker Games</h1>
-        <p className="text-lg text-gray-600 mb-8 text-center">
-          Play these simple games to help reduce awkwardness when chatting with new people.
-        </p>
-
-        {!activeGame ? (
-          <div className="grid md:grid-cols-3 gap-6">
-            <div className="bg-white p-6 rounded-lg shadow-md hover:shadow-lg transition-shadow">
-              <h2 className="text-xl font-bold text-gray-800 mb-3">Question Game</h2>
-              <p className="text-gray-600 mb-4">
-                Get a random interesting question to discuss with your match.
-              </p>
-              <button
-                onClick={startQuestionGame}
-                className="w-full bg-indigo-600 text-white px-4 py-2 rounded-md font-medium hover:bg-indigo-500"
-              >
-                Start Game
-              </button>
-            </div>
-
-            <div className="bg-white p-6 rounded-lg shadow-md hover:shadow-lg transition-shadow">
-              <h2 className="text-xl font-bold text-gray-800 mb-3">Word Association</h2>
-              <p className="text-gray-600 mb-4">
-                Respond with a word that you associate with the previous word.
-              </p>
-              <button
-                onClick={startWordAssociationGame}
-                className="w-full bg-indigo-600 text-white px-4 py-2 rounded-md font-medium hover:bg-indigo-500"
-              >
-                Start Game
-              </button>
-            </div>
-
-            <div className="bg-white p-6 rounded-lg shadow-md hover:shadow-lg transition-shadow">
-              <h2 className="text-xl font-bold text-gray-800 mb-3">Two Truths & A Lie</h2>
-              <p className="text-gray-600 mb-4">
-                Share two true facts and one lie, and let others guess which is the lie.
-              </p>
-              <button
-                onClick={startTwoTruthsGame}
-                className="w-full bg-indigo-600 text-white px-4 py-2 rounded-md font-medium hover:bg-indigo-500"
-              >
-                Start Game
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="bg-white p-6 rounded-lg shadow-md">
-            {/* Question Game */}
-            {activeGame === 'questions' && (
-              <div>
-                <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">Question Game</h2>
-                {currentQuestion && (
-                  <div className="mb-6 text-center">
-                    <p className="text-xl text-gray-700 mb-6 p-4 bg-indigo-50 rounded-lg">
-                      {currentQuestion.text}
-                    </p>
-                    <p className="text-gray-600 mb-8">
-                      Discuss this question with your match to learn more about each other!
-                    </p>
-                  </div>
-                )}
-                <div className="flex justify-center space-x-4">
-                  <button
-                    onClick={getRandomQuestion}
-                    className="bg-indigo-600 text-white px-4 py-2 rounded-md font-medium hover:bg-indigo-500"
-                  >
-                    Next Question
-                  </button>
-                  <button
-                    onClick={resetGames}
-                    className="bg-gray-200 text-gray-800 px-4 py-2 rounded-md font-medium hover:bg-gray-300"
-                  >
-                    Exit Game
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Word Association Game */}
-            {activeGame === 'word-association' && (
-              <div>
-                <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">Word Association</h2>
-                <div className="mb-6">
-                  <div className="flex justify-center">
-                    <div className="inline-block bg-indigo-100 text-indigo-800 px-6 py-3 rounded-lg text-xl font-medium mb-6">
-                      {word}
-                    </div>
-                  </div>
-                  <form onSubmit={submitWord} className="mb-4">
-                    <div className="flex items-center justify-center space-x-2">
-                      <input
-                        type="text"
-                        value={inputWord}
-                        onChange={(e) => setInputWord(e.target.value)}
-                        placeholder="Enter a related word..."
-                        className="px-3 py-2 border border-gray-300 rounded-md flex-grow max-w-md"
-                      />
-                      <button
-                        type="submit"
-                        className="bg-indigo-600 text-white px-4 py-2 rounded-md font-medium hover:bg-indigo-500"
-                      >
-                        Submit
-                      </button>
-                    </div>
-                  </form>
-
-                  {previousWords.length > 1 && (
-                    <div className="mt-6">
-                      <h3 className="text-lg font-medium text-gray-700 mb-2">Word Chain:</h3>
-                      <div className="flex flex-wrap justify-center gap-2">
-                        {previousWords.map((prev, index) => (
-                          <span key={index} className="bg-gray-100 text-gray-800 px-3 py-1 rounded-md text-sm">
-                            {prev}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-                <div className="flex justify-center">
-                  <button
-                    onClick={resetGames}
-                    className="bg-gray-200 text-gray-800 px-4 py-2 rounded-md font-medium hover:bg-gray-300"
-                  >
-                    Exit Game
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Two Truths and a Lie Game */}
-            {activeGame === 'two-truths' && (
-              <div>
-                <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">Two Truths and a Lie</h2>
-                
-                {twoTruthsStep === 'setup' && (
-                  <div>
-                    <p className="text-gray-600 mb-6 text-center">
-                      Enter two true statements and one false statement about yourself.
-                      Then mark which one is the lie.
-                    </p>
-                    <div className="space-y-4 mb-6">
-                      {twoTruthsGame.statements.map((statement, index) => (
-                        <div key={index} className="flex items-center space-x-2">
-                          <input
-                            type="text"
-                            value={statement}
-                            onChange={(e) => handleStatementChange(index, e.target.value)}
-                            placeholder={`Statement ${index + 1}`}
-                            className="px-3 py-2 border border-gray-300 rounded-md flex-grow"
-                          />
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-gray-600 mb-4 text-center">Now select which statement is the lie:</p>
-                    <div className="space-y-2 mb-6">
-                      {twoTruthsGame.statements.map((statement, index) => (
-                        <button
-                          key={index}
-                          onClick={() => setLie(index)}
-                          disabled={!statement}
-                          className={`w-full text-left p-3 rounded-md ${!statement ? 'bg-gray-100 text-gray-400' : 'bg-indigo-50 text-gray-800 hover:bg-indigo-100'}`}
-                        >
-                          {statement || `Statement ${index + 1}`}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {twoTruthsStep === 'play' && (
-                  <div>
-                    <p className="text-gray-600 mb-6 text-center">
-                      Share these statements with your match and ask them to guess which one is the lie!
-                    </p>
-                    <div className="space-y-3 mb-6">
-                      {twoTruthsGame.statements.map((statement, index) => (
-                        <div key={index} className="p-3 bg-gray-50 rounded-md">
-                          {statement}
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-gray-600 mb-4 text-center">
-                      Which statement did they think is the lie?
-                    </p>
-                    <div className="space-y-2 mb-6">
-                      {twoTruthsGame.statements.map((statement, index) => (
-                        <button
-                          key={index}
-                          onClick={() => guessLie(index)}
-                          className="w-full text-left p-3 rounded-md bg-indigo-50 text-gray-800 hover:bg-indigo-100"
-                        >
-                          {statement}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {twoTruthsStep === 'result' && (
-                  <div>
-                    <h3 className="text-xl font-semibold text-center mb-6">
-                      {selectedLie === twoTruthsGame.answer ? 
-                        "They got it right!" : 
-                        "They didn't guess correctly!"}
-                    </h3>
-                    <div className="space-y-3 mb-6">
-                      {twoTruthsGame.statements.map((statement, index) => (
-                        <div 
-                          key={index} 
-                          className={`p-3 rounded-md ${
-                            index === twoTruthsGame.answer 
-                              ? 'bg-red-100 text-red-800' 
-                              : 'bg-green-100 text-green-800'
-                          }`}
-                        >
-                          {statement}
-                          {index === twoTruthsGame.answer && " (The Lie)"}
-                          {index !== twoTruthsGame.answer && " (Truth)"}
-                        </div>
-                      ))}
-                    </div>
-                    <div className="flex justify-center space-x-4">
-                      <button
-                        onClick={startTwoTruthsGame}
-                        className="bg-indigo-600 text-white px-4 py-2 rounded-md font-medium hover:bg-indigo-500"
-                      >
-                        Play Again
-                      </button>
-                      <button
-                        onClick={resetGames}
-                        className="bg-gray-200 text-gray-800 px-4 py-2 rounded-md font-medium hover:bg-gray-300"
-                      >
-                        Exit Game
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {twoTruthsStep !== 'result' && (
-                  <div className="flex justify-center mt-4">
-                    <button
-                      onClick={resetGames}
-                      className="bg-gray-200 text-gray-800 px-4 py-2 rounded-md font-medium hover:bg-gray-300"
-                    >
-                      Exit Game
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+    <div className="flex h-screen bg-gray-100">
+      {/* Main Game Area */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {renderGameContent()}
       </div>
     </div>
   );

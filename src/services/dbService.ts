@@ -54,13 +54,106 @@ export interface Message {
   timestamp: string;
 }
 
+// Add new interfaces for Game Sessions and Game Messages
+export interface GameMessage {
+  id?: string;
+  gameSessionId: string;
+  senderId: string;
+  senderName?: string; // Optional: for display
+  text: string;
+  timestamp: any; // Firestore Timestamp or Date
+  type?: 'event' | 'chat'; // To distinguish game events from player chat
+}
+
+export interface TruthLieRound { // For storing history of each round
+  roundNumber: number;
+  playerMakingStatements: string;
+  question: string;
+  trueAnswer: string;
+  lieAnswer: string;
+  guesser: string;
+  guesserChoice?: string; // The text of the answer the guesser chose
+  isCorrect?: boolean;
+}
+
+export interface TruthOrLieGameData {
+  rounds: TruthLieRound[]; // History of completed rounds
+  currentRound: number; // 0-indexed
+  maxRounds: number;
+  scores: { [playerId: string]: number };
+  
+  playerMakingStatements: string; // UID of player currently setting up the question/answers
+  playerGuessing: string; // UID of player who will guess
+
+  // Current round's state
+  currentQuestion?: string;
+  currentTrueAnswer?: string;
+  currentLieAnswer?: string;
+  presentedAnswers?: string[]; // [answer1, answer2] as shown to guesser (randomized order)
+  guesserChoiceForCurrentRound?: string;
+  currentRoundResult?: 'correct' | 'incorrect' | null;
+
+  roundPhase: 'submitting' | 'guessing' | 'revealed' | 'round_over' | 'game_over';
+  errorMessage?: string | null;
+}
+
+export interface WordChainGameData {
+  words: Array<{ word: string; player: string; timestamp?: any }>; // Store who played which word
+  lastWord: string | null;
+  usedWords: string[]; // Store lowercase words to prevent case sensitivity issues
+  scores?: { [playerId: string]: number };
+  errorMessage?: string | null;
+}
+
+export interface ProverbsGameData {
+  proverbsList: Array<{ start: string; end: string; hint?: string; completedBy?: string; isCorrect?: boolean; revealedEnd?: string }>;
+  currentProverbIndex: number | null;
+  score: { [playerId: string]: number };
+  currentAttempt?: string;
+  proverbRevealed?: boolean;
+}
+
+export interface RiddlesGameData {
+  riddlesList: Array<{ question: string; answer: string; hint?: string; solvedBy?: string; isCorrect?: boolean; revealedAnswer?: string }>;
+  currentRiddleIndex: number | null;
+  score: { [playerId: string]: number };
+  currentAttempt?: string;
+  riddleRevealed?: boolean;
+}
+
+export interface GameSession {
+  id: string;
+  gameType: 'truth-or-lie' | 'word-chain' | 'proverbs' | 'riddles';
+  player1: string;
+  player2: string;
+  chatId: string;
+  status: 'active' | 'completed' | 'abandoned';
+  currentTurn: string;
+  createdAt: any;
+  lastMoveAt: any;
+  winner?: string;
+  gameData: TruthOrLieGameData | WordChainGameData | ProverbsGameData | RiddlesGameData | any;
+}
+
+// Interface for updating game session data (allows partial updates)
+export interface GameSessionUpdateData {
+  gameData?: TruthOrLieGameData | WordChainGameData | ProverbsGameData | RiddlesGameData | any;
+  currentTurn?: string;
+  status?: 'active' | 'completed' | 'abandoned';
+  winner?: string | null; // Allow null to clear winner
+  lastMoveAt?: any;
+  // Add any other fields that might be updated individually
+}
+
 // In-memory mock database to simulate SQLite functionality
 let mockDatabase = {
   users: [] as User[],
   user_interests: [] as UserInterest[],
   clubs: [] as Club[],
   chats: [] as Chat[],
-  messages: [] as Message[]
+  messages: [] as Message[],
+  gameSessions: [] as GameSession[], // Add gameSessions to mock DB
+  gameMessages: [] as GameMessage[], // Add gameMessages to mock DB
 };
 
 // Force to use Firebase, never use mock data
@@ -544,26 +637,78 @@ export const dbService = {
   
   async getUserChats(uid: string): Promise<any[]> {
     try {
+      console.log(`Getting chats for user ${uid}`);
       const chatsRef = collection(db, 'chats');
+      
+      // The issue might be in this query - let's modify it to use both participant fields
+      // since we're storing the participants both as user1/user2 and in the participants array
       const q = query(
         chatsRef,
-        where('participants', 'array-contains', uid),
-        orderBy('updatedAt', 'desc')
+        where('participants', 'array-contains', uid)
       );
       
+      console.log("Executing chats query with participants field");
       const querySnapshot = await getDocs(q);
       
-      const chats = [];
+      // If no chats found with participants field, try alternative query approach
+      if (querySnapshot.empty) {
+        console.log("No chats found with participants field, trying alternative query");
+        // Fallback to querying by user1 or user2 fields
+        const q1 = query(chatsRef, where('user1', '==', uid));
+        const q2 = query(chatsRef, where('user2', '==', uid));
+        
+        const [snapshot1, snapshot2] = await Promise.all([
+          getDocs(q1),
+          getDocs(q2)
+        ]);
+        
+        // Combine results from both queries
+        const combinedDocs = [...snapshot1.docs, ...snapshot2.docs];
+        console.log(`Found ${combinedDocs.length} chats using alternative query`);
+        
+        // Process results
+        return this.processChatsSnapshot(combinedDocs, uid);
+      }
       
-      for (const chatDoc of querySnapshot.docs) {
+      console.log(`Found ${querySnapshot.docs.length} chats for user ${uid}`);
+      return this.processChatsSnapshot(querySnapshot.docs, uid);
+      
+    } catch (err) {
+      console.error('Error getting user chats:', err);
+      throw err;
+    }
+  },
+  
+  // Helper method to process chat snapshots consistently
+  async processChatsSnapshot(chatDocs: any[], uid: string): Promise<any[]> {
+    const chats = [];
+    
+    for (const chatDoc of chatDocs) {
+      try {
         const chatData = chatDoc.data();
+        console.log(`Processing chat: ${chatDoc.id}`, chatData);
         
         // Get other user ID
-        const otherUserId = chatData.user1 === uid ? chatData.user2 : chatData.user1;
+        // First check if user1 and user2 fields exist
+        let otherUserId = null;
+        if (chatData.user1 && chatData.user2) {
+          otherUserId = chatData.user1 === uid ? chatData.user2 : chatData.user1;
+        } 
+        // If not, check participants array
+        else if (chatData.participants && Array.isArray(chatData.participants)) {
+          otherUserId = chatData.participants.find((id: any) => id !== uid);
+        }
+        
+        if (!otherUserId) {
+          console.warn(`No other user found in chat ${chatDoc.id}`);
+          continue; // Skip this chat
+        }
+        
+        console.log(`Found other user ID: ${otherUserId} for chat ${chatDoc.id}`);
         
         // Get other user details
         let otherUser = null;
-        if (otherUserId) {
+        try {
           const userDoc = await getDoc(doc(db, 'users', otherUserId));
           if (userDoc.exists()) {
             const userData = userDoc.data();
@@ -579,30 +724,52 @@ export const dbService = {
               otherUser = {
                 uid: otherUserId,
                 displayName: userData.displayName || '',
-                photoURL: userData.photoURL || ''
+                photoURL: userData.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(userData.displayName || 'User')}&background=random`
               };
             }
+          } else {
+            console.log(`User ${otherUserId} not found`);
+            // Default fallback if user not found
+            otherUser = {
+              uid: otherUserId,
+              displayName: "Unknown User",
+              photoURL: "https://ui-avatars.com/api/?background=random&name=Unknown&size=128"
+            };
           }
+        } catch (error) {
+          console.error(`Error getting other user ${otherUserId}:`, error);
+          otherUser = {
+            uid: otherUserId,
+            displayName: "Unknown User",
+            photoURL: "https://ui-avatars.com/api/?background=random&name=Unknown&size=128"
+          };
         }
         
         // Get last message
-        const messagesRef = collection(db, 'messages');
-        const messageQuery = query(
-          messagesRef,
-          where('chatId', '==', chatDoc.id),
-          orderBy('timestamp', 'desc'),
-          limit(1)
-        );
-        
-        const messageSnapshot = await getDocs(messageQuery);
         let lastMessage = null;
-        
-        if (!messageSnapshot.empty) {
-          const messageData = messageSnapshot.docs[0].data();
-          lastMessage = {
-            text: messageData.text || '',
-            timestamp: messageData.timestamp ? messageData.timestamp.toDate().toISOString() : new Date().toISOString()
-          };
+        try {
+          const messagesRef = collection(db, 'messages');
+          const messageQuery = query(
+            messagesRef,
+            where('chatId', '==', chatDoc.id),
+            orderBy('timestamp', 'desc'),
+            limit(1)
+          );
+          
+          const messageSnapshot = await getDocs(messageQuery);
+          
+          if (!messageSnapshot.empty) {
+            const messageData = messageSnapshot.docs[0].data();
+            console.log(`Found last message for chat ${chatDoc.id}:`, messageData);
+            lastMessage = {
+              text: messageData.text || '',
+              timestamp: messageData.timestamp ? messageData.timestamp.toDate().toISOString() : new Date().toISOString()
+            };
+          } else {
+            console.log(`No messages found for chat ${chatDoc.id}`);
+          }
+        } catch (error) {
+          console.error(`Error getting last message for chat ${chatDoc.id}:`, error);
         }
         
         chats.push({
@@ -613,15 +780,18 @@ export const dbService = {
           isAnonymous: chatData.isAnonymous || false,
           lastMessage
         });
+      } catch (err) {
+        console.error(`Error processing chat ${chatDoc.id}:`, err);
+        // Continue processing other chats even if one fails
       }
-      
-      return chats;
-    } catch (err) {
-      console.error('Error getting user chats:', err);
-      return [];
     }
+    
+    // Sort chats by updatedAt, most recent first
+    return chats.sort((a, b) => 
+      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
   },
-  
+
   async createChat(user1: string, user2: string, isAnonymous = false): Promise<string> {
     try {
       // Create a chat ID based on sorted user IDs to ensure uniqueness
@@ -684,7 +854,7 @@ export const dbService = {
           chatId: msgData.chatId,
           senderId: msgData.senderId,
           senderName: senderName,
-          text: msgData.text,
+          text: msgData.text || "",  // Ensure text field exists
           timestamp: msgData.timestamp ? msgData.timestamp.toDate().toISOString() : new Date().toISOString()
         });
       }
@@ -725,95 +895,67 @@ export const dbService = {
     }
   },
   
-  // Friends/Recommendations functions
-  async getFriendRecommendations(userId: string, limit = 10): Promise<User[]> {
-    try {
-      // Get current user's interests
-      const currentUserInterestsDoc = await getDoc(doc(db, 'user_interests', userId));
-      if (!currentUserInterestsDoc.exists()) return [];
-      
-      const userInterests = currentUserInterestsDoc.data().interests || [];
-      
-      if (userInterests.length === 0) return [];
-      
-      // Get all users and their interests
-      const usersRef = collection(db, 'users');
-      const usersSnapshot = await getDocs(usersRef);
-      
-      const usersWithCommonInterests: Record<string, User & { commonInterests: string[], commonInterestsCount: number }> = {};
-      
-      // Get all users and their interests (excluding current user)
-      for (const userDoc of usersSnapshot.docs) {
-        if (userDoc.id === userId) continue; // Skip current user
-        
-        const userData = userDoc.data();
-        const userInterestsDoc = await getDoc(doc(db, 'user_interests', userDoc.id));
-        const interests = userInterestsDoc.exists() ? userInterestsDoc.data().interests : [];
-        
-        // Calculate common interests
-        const commonInterests = interests.filter((interest: string) => userInterests.includes(interest));
-        
-        if (commonInterests.length > 0) {
-          usersWithCommonInterests[userDoc.id] = {
-            uid: userDoc.id,
-            displayName: userData.displayName || '',
-            email: userData.email || '',
-            photoURL: userData.photoURL || '',
-            createdAt: userData.createdAt ? userData.createdAt.toDate().toISOString() : new Date().toISOString(),
-            interests: interests,
-            commonInterests: commonInterests,
-            commonInterestsCount: commonInterests.length
-          };
-        }
+  // Game Session Management
+  getGameSession: async (sessionId: string): Promise<GameSession | null> => {
+    if (useFirebase) {
+      const sessionDoc = await getDoc(doc(db, 'gameSessions', sessionId));
+      return sessionDoc.exists() ? { id: sessionDoc.id, ...sessionDoc.data() } as GameSession : null;
+    }
+    // Mock implementation
+    return mockDatabase.gameSessions.find(s => s.id === sessionId) || null;
+  },
+
+  updateGameSession: async (sessionId: string, data: Partial<GameSessionUpdateData>): Promise<void> => {
+    if (useFirebase) {
+      const sessionRef = doc(db, 'gameSessions', sessionId);
+      await updateDoc(sessionRef, data);
+    } else {
+      // Mock implementation
+      const index = mockDatabase.gameSessions.findIndex(s => s.id === sessionId);
+      if (index !== -1) {
+        mockDatabase.gameSessions[index] = { ...mockDatabase.gameSessions[index], ...data } as GameSession;
       }
-      
-      // Sort by number of common interests and limit results
-      return Object.values(usersWithCommonInterests)
-        .sort((a, b) => b.commonInterestsCount - a.commonInterestsCount)
-        .slice(0, limit);
-    } catch (err) {
-      console.error('Error getting friend recommendations:', err);
-      return [];
     }
   },
-  
-  // Helper functions
-  async getAllInterests(): Promise<string[]> {
-    try {
-      // Get interests from all users in Firestore instead of mock data
-      const usersRef = collection(db, 'users');
-      const usersSnapshot = await getDocs(usersRef);
-      
-      const allInterests = new Set<string>();
-      
-      // Get interests from each user
-      for (const userDoc of usersSnapshot.docs) {
-        const userInterestsDoc = await getDoc(doc(db, 'user_interests', userDoc.id));
-        if (userInterestsDoc.exists()) {
-          const interests = userInterestsDoc.data().interests || [];
-          interests.forEach((interest: string) => {
-            if (interest) allInterests.add(interest);
-          });
-        }
-      }
-      
-      console.log('Fetched interests from Firebase:', Array.from(allInterests));
-      return Array.from(allInterests).sort();
-    } catch (err) {
-      console.error('Error getting all interests from Firebase:', err);
-      return [];
+
+  // Game Messages
+  sendGameMessage: async (gameSessionId: string, senderId: string, text: string, type: 'event' | 'chat' = 'chat', senderName?: string): Promise<string> => {
+    const messageData: Omit<GameMessage, 'id'> = {
+      gameSessionId,
+      senderId,
+      senderName: senderName || 'System',
+      text,
+      timestamp: useFirebase ? serverTimestamp() : new Date().toISOString(),
+      type,
+    };
+
+    if (useFirebase) {
+      const docRef = await addDoc(collection(db, 'gameMessages'), messageData);
+      return docRef.id;
+    } else {
+      // Mock implementation
+      const id = `gm_${Date.now()}`;
+      mockDatabase.gameMessages.push({ id, ...messageData } as GameMessage);
+      return id;
     }
   },
-  
-  // Generate a unique ID
-  generateId(): string {
-    return Date.now().toString(36) + Math.random().toString(36).substring(2);
+
+  getGameMessages: async (gameSessionId: string): Promise<GameMessage[]> => {
+    if (useFirebase) {
+      const q = query(
+        collection(db, 'gameMessages'),
+        where('gameSessionId', '==', gameSessionId),
+        orderBy('timestamp', 'asc')
+      );
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as GameMessage));
+    }
+    // Mock implementation
+    return mockDatabase.gameMessages
+      .filter(m => m.gameSessionId === gameSessionId)
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   },
-  
-  // Close database connection (just for API compatibility)
-  closeDatabase(): void {
-    console.log('Mock database connection closed');
-  }
+  // ... other functions
 };
 
 // React hook to use database

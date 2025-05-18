@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import dbService from '../../services/dbService';
 import { auth } from '../../firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 
 interface ChatInfo {
   id: string;
@@ -26,38 +27,58 @@ const ChatList: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [activeFilter, setActiveFilter] = useState<'all' | 'unread' | 'archived'>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Auth state listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setCurrentUserId(user.uid);
+      } else {
+        setCurrentUserId(null);
+        setChats([]);
+      }
+    });
+    
+    return () => unsubscribe();
+  }, []);
 
   // Fetch chats from database
   useEffect(() => {
+    if (!currentUserId) return;
+    
     const fetchChats = async () => {
       try {
-        const currentUser = auth.currentUser;
-        
-        if (!currentUser) {
-          console.error('User not authenticated');
-          setLoading(false);
-          return;
-        }
+        setLoading(true);
+        setError(null);
+        console.log("Fetching chats for user:", currentUserId);
         
         // Get current user's chats
-        const userChats = await dbService.getUserChats(currentUser.uid);
+        const userChats = await dbService.getUserChats(currentUserId);
+        console.log("Retrieved chats:", userChats.length);
         
-        // Add unread count for demo purposes
+        // Add unread count for demo purposes (replace with real unread count logic if available)
         const enhancedChats = userChats.map((chat, index) => ({
           ...chat,
           unreadCount: index % 3 === 0 ? Math.floor(Math.random() * 5) + 1 : 0,
+          otherUser: {
+            ...chat.otherUser,
+            isOnline: Math.random() > 0.7 // Random online status for demo
+          }
         }));
         
         setChats(enhancedChats);
         setLoading(false);
       } catch (error) {
         console.error('Error fetching chats:', error);
+        setError('Failed to load conversations. Please try again.');
         setLoading(false);
       }
     };
     
     fetchChats();
-  }, []);
+  }, [currentUserId]);
 
   // Format message time
   const formatMessageTime = (dateString: string) => {
@@ -199,6 +220,50 @@ const ChatList: React.FC = () => {
                   </div>
                 </div>
               ))
+            ) : error ? (
+              <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 text-red-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <h3 className="text-lg font-medium text-gray-700 mb-2">Error Loading Conversations</h3>
+                <p className="text-gray-500 mb-4">{error}</p>
+                <div className="text-sm text-gray-500 mb-4">
+                  User ID: {currentUserId || 'Not logged in'}
+                </div>
+                <button 
+                  onClick={() => {
+                    setError(null);
+                    setLoading(true);
+                    if (currentUserId) {
+                      console.log("Retrying chat fetch for user:", currentUserId);
+                      dbService.getUserChats(currentUserId)
+                        .then(chats => {
+                          const enhancedChats = chats.map((chat, index) => ({
+                            ...chat,
+                            unreadCount: index % 3 === 0 ? Math.floor(Math.random() * 5) + 1 : 0,
+                            otherUser: {
+                              ...chat.otherUser,
+                              isOnline: Math.random() > 0.7
+                            }
+                          }));
+                          setChats(enhancedChats);
+                          setLoading(false);
+                        })
+                        .catch(err => {
+                          console.error("Retry failed:", err);
+                          setError('Failed to load conversations. Please check your network connection and try again.');
+                          setLoading(false);
+                        });
+                    } else {
+                      setError('You need to be logged in to view conversations');
+                      setLoading(false);
+                    }
+                  }}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
+                >
+                  Try Again
+                </button>
+              </div>
             ) : filteredChats.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
                 {searchTerm ? (
@@ -231,7 +296,16 @@ const ChatList: React.FC = () => {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                     </svg>
                     <h3 className="text-lg font-medium text-gray-700 mb-2">No messages yet</h3>
-                    <p className="text-gray-500">Start a conversation with someone</p>
+                    <p className="text-gray-500 mb-4">Start a conversation with someone</p>
+                    <Link 
+                      to="/random-match" 
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 flex items-center"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" />
+                      </svg>
+                      Find Someone to Chat With
+                    </Link>
                   </>
                 )}
               </div>
@@ -312,9 +386,9 @@ const ChatList: React.FC = () => {
           </div>
           
           {/* New message button */}
-          <div className="sticky bottom-4 flex justify-center mt-4">
+          <div className="sticky bottom-4 flex justify-center mt-4 mb-4">
             <Link
-              to="/find-friends"
+              to="/random-match"
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-full shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">

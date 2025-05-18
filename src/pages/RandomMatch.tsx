@@ -221,12 +221,30 @@ const RandomMatch = () => {
     if (!currentUser || !matchedUser) return;
     
     try {
+      console.log("Creating chat between", currentUser.uid, "and", matchedUser.uid, "with anonymous:", isAnonymous);
+      
       // First create the chat record in the database
       const chatId = await dbService.createChat(
         currentUser.uid, 
         matchedUser.uid,
         isAnonymous // Pass the anonymous flag to create proper anonymous chat
       );
+      
+      // Send initial greeting message
+      const helloMessage = isAnonymous ? 
+        "Hello! This is an anonymous chat. Nice to meet you!" : 
+        `Hi, I'm ${currentUser.displayName}! Nice to connect with you!`;
+      
+      // Add a message to start the conversation
+      //@ts-ignore
+      await dbService.sendMessage({
+        chatId: chatId,
+        senderId: currentUser.uid,
+        text: helloMessage,
+        timestamp: new Date().toISOString()
+      });
+      
+      console.log("Chat created with ID:", chatId);
       
       // Then navigate to the chat
       navigate(`/chat/${chatId}`);
